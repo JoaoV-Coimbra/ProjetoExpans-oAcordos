@@ -1,0 +1,76 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+.yarnrc.yml
+
+# Build output and caches
+dist/
+build/
+.vite/
+.cache/
+coverage/
+*.tsbuildinfo
+.eslintcache
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data and imported files
+server/data/**
+!server/data/
+!server/data/.gitkeep
+server/uploads/**
+uploads/
+data/
+tmp/
+temp/
+
+# Local databases and data snapshots
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+*.sqlite3-journal
+
+# Spreadsheets and source imports
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.ods
+
+# Generated exports and reports
+exports/
+reports/
+downloads/
+*.pdf
+
+# Temporary backups
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
