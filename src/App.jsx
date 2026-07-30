@@ -13,6 +13,7 @@ import {
   Search,
   Trash2,
   UploadCloud,
+  UserRound,
   WalletCards,
   X,
 } from "lucide-react";
@@ -46,6 +47,18 @@ function formatDate(value) {
 
 function formatCurrency(value) {
   return typeof value === "number" ? currencyFormatter.format(value) : "-";
+}
+
+function getInstallmentValue(agreement) {
+  return agreement.updatedValue ?? agreement.value ?? 0;
+}
+
+function normalizeText(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function isOverdueAgreement(agreement, todayIso) {
@@ -257,7 +270,7 @@ const AgreementRow = React.memo(function AgreementRow({ agreement }) {
       <TableCell className="text-zinc-300">{formatDate(agreement.agreementDate)}</TableCell>
       <TableCell className="text-zinc-300">{formatDate(agreement.dueDate)}</TableCell>
       <TableCell className="text-zinc-300">{formatDate(agreement.receiptDate)}</TableCell>
-      <TableCell className="text-zinc-300">{formatCurrency(agreement.value)}</TableCell>
+      <TableCell className="text-zinc-300">{formatCurrency(getInstallmentValue(agreement))}</TableCell>
       <TableCell>
         {status ? (
           <Badge variant="secondary" className={statusClassName}>
@@ -276,7 +289,7 @@ const AgreementRow = React.memo(function AgreementRow({ agreement }) {
 
 function getSortValue(agreement, key) {
   if (key === "status") return agreement.effectiveStatus || agreement.status || "";
-  if (key === "value") return agreement.value || 0;
+  if (key === "value") return getInstallmentValue(agreement);
   if (key === "agreementId" || key === "installment" || key === "unit") {
     const parsed = Number(String(agreement[key] || "").replace(",", "."));
     return Number.isFinite(parsed) ? parsed : agreement[key] || "";
@@ -437,6 +450,500 @@ function RankingCard({ title, description, rows, valueKey = "total", valueFormat
   );
 }
 
+function ProfileAgreementField({ label, children }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] font-medium uppercase text-zinc-500">{label}</p>
+      <div className="mt-1 break-words text-sm text-zinc-200">{children || <span className="text-zinc-500">-</span>}</div>
+    </div>
+  );
+}
+
+function ProfileAgreementsList({ agreements }) {
+  return (
+    <CardContent className="max-h-[640px] overflow-y-auto p-0">
+      <div className="divide-y divide-white/10">
+        {agreements.map((agreement) => {
+          const status = agreement.effectiveStatus || agreement.status;
+          const statusClassName =
+            status === "Vencido"
+              ? "bg-red-500/15 text-red-200"
+              : status === "Cancelado"
+                ? "bg-zinc-500/15 text-zinc-300"
+                : "bg-white/10 text-zinc-200";
+
+          return (
+            <article className="grid gap-3 px-4 py-3" key={agreement.id}>
+              <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white">Acordo {agreement.agreementId}</p>
+                  <p className="mt-1 break-words text-xs text-zinc-500">
+                    {agreement.personName || "Sem nome"}
+                  </p>
+                </div>
+                {status ? (
+                  <Badge variant="secondary" className={statusClassName}>
+                    {status}
+                  </Badge>
+                ) : null}
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+                <ProfileAgreementField label="Parcela">
+                  {agreement.installment || "-"}
+                  {agreement.installmentCount ? (
+                    <span className="text-zinc-500">/{agreement.installmentCount}</span>
+                  ) : null}
+                  {agreement.parcelId ? <div className="mt-1 text-xs text-zinc-500">ID {agreement.parcelId}</div> : null}
+                </ProfileAgreementField>
+                <ProfileAgreementField label="Unidade">
+                  {agreement.unit || "-"}
+                  {agreement.admUnit ? <div className="mt-1 text-xs text-zinc-500">ADM {agreement.admUnit}</div> : null}
+                </ProfileAgreementField>
+                <ProfileAgreementField label="Condominio">
+                  {agreement.condominium || "-"}
+                  {agreement.administrator ? (
+                    <div className="mt-1 text-xs text-zinc-500">{agreement.administrator}</div>
+                  ) : null}
+                </ProfileAgreementField>
+                <ProfileAgreementField label="Firmacao">{formatDate(agreement.agreementDate)}</ProfileAgreementField>
+                <ProfileAgreementField label="Vencimento">{formatDate(agreement.dueDate)}</ProfileAgreementField>
+                <ProfileAgreementField label="Recebimento">{formatDate(agreement.receiptDate)}</ProfileAgreementField>
+                <ProfileAgreementField label="Valor atualizado">
+                  {formatCurrency(getInstallmentValue(agreement))}
+                </ProfileAgreementField>
+                <ProfileAgreementField label="Correcao">
+                  {agreement.correctionStatus || "-"}
+                </ProfileAgreementField>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </CardContent>
+  );
+}
+
+function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onSelectProfile }) {
+  const [selectedAgreementId, setSelectedAgreementId] = useState("");
+  const profileListRef = useRef(null);
+  const profileFrameRef = useRef(null);
+  const [profileScrollTop, setProfileScrollTop] = useState(0);
+  const profileRows = useMemo(() => {
+    const byPerson = new Map();
+
+    agreements.forEach((agreement) => {
+      const name = agreement.personName?.trim();
+      if (!name) return;
+
+      const key = normalizeText(name);
+      const current =
+        byPerson.get(key) || {
+          key,
+          name,
+          total: 0,
+          agreements: new Set(),
+          receivable: 0,
+          received: 0,
+          overdue: 0,
+        };
+      const status = agreement.effectiveStatus || agreement.status;
+      const value = getInstallmentValue(agreement);
+
+      current.total += 1;
+      current.agreements.add(agreement.agreementId);
+
+      if (status === "Recebido") {
+        current.received += agreement.receivedValue || value;
+      }
+
+      if (status === "Em aberto" || status === "Vencido") {
+        current.receivable += value;
+      }
+
+      if (isOverdueAgreement(agreement, new Date().toISOString().slice(0, 10))) {
+        current.overdue += 1;
+      }
+
+      byPerson.set(key, current);
+    });
+
+    return [...byPerson.values()]
+      .map((row) => ({ ...row, agreementCount: row.agreements.size }))
+      .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "pt-BR"));
+  }, [agreements]);
+  const normalizedSearch = normalizeText(search);
+  const matchingProfiles = useMemo(
+    () =>
+      profileRows.filter((row) => !normalizedSearch || normalizeText(row.name).includes(normalizedSearch)),
+    [normalizedSearch, profileRows]
+  );
+  const PROFILE_ROW_HEIGHT = 84;
+  const PROFILE_VIEWPORT_HEIGHT = 224;
+  const PROFILE_OVERSCAN = 6;
+  const profileStartIndex = Math.max(0, Math.floor(profileScrollTop / PROFILE_ROW_HEIGHT) - PROFILE_OVERSCAN);
+  const profileVisibleCount = Math.ceil(PROFILE_VIEWPORT_HEIGHT / PROFILE_ROW_HEIGHT) + PROFILE_OVERSCAN * 2;
+  const profileEndIndex = Math.min(matchingProfiles.length, profileStartIndex + profileVisibleCount);
+  const visibleProfiles = matchingProfiles.slice(profileStartIndex, profileEndIndex);
+  const profileTopSpacer = profileStartIndex * PROFILE_ROW_HEIGHT;
+  const profileBottomSpacer = Math.max(0, (matchingProfiles.length - profileEndIndex) * PROFILE_ROW_HEIGHT);
+  const selectedProfileKey = normalizeText(selectedProfile);
+  const selectedExists = selectedProfileKey && profileRows.some((row) => row.key === selectedProfileKey);
+  const activeProfile = selectedExists ? selectedProfile : normalizedSearch ? matchingProfiles[0]?.name || "" : "";
+  const activeProfileKey = normalizeText(activeProfile);
+  const activeAgreements = useMemo(
+    () => agreements.filter((agreement) => normalizeText(agreement.personName) === activeProfileKey),
+    [activeProfileKey, agreements]
+  );
+  const agreementOptions = useMemo(() => {
+    const byAgreement = new Map();
+
+    activeAgreements.forEach((agreement) => {
+      const agreementId = agreement.agreementId || "Sem acordo";
+      const current =
+        byAgreement.get(agreementId) || {
+          agreementId,
+          total: 0,
+          receivable: 0,
+          received: 0,
+          completedCount: 0,
+          canceledCount: 0,
+          inProgressCount: 0,
+        };
+      const status = agreement.effectiveStatus || agreement.status;
+      const value = getInstallmentValue(agreement);
+
+      current.total += 1;
+      if (status === "Cancelado") {
+        current.canceledCount += 1;
+      } else if (status === "Recebido" || status === "Finalizado") {
+        current.completedCount += 1;
+      } else {
+        current.inProgressCount += 1;
+      }
+
+      if (status === "Recebido") {
+        current.received += agreement.receivedValue || value;
+      }
+      if (status === "Em aberto" || status === "Vencido") {
+        current.receivable += value;
+      }
+
+      byAgreement.set(agreementId, current);
+    });
+
+    return [...byAgreement.values()]
+      .map((agreement) => ({
+        ...agreement,
+        status:
+          agreement.inProgressCount > 0
+            ? "Em andamento"
+            : agreement.canceledCount === agreement.total
+              ? "Cancelado"
+              : "Concluído",
+      }))
+      .sort((a, b) => String(a.agreementId).localeCompare(String(b.agreementId), "pt-BR", { numeric: true }));
+  }, [activeAgreements]);
+  const selectedAgreementAgreements = useMemo(
+    () =>
+      selectedAgreementId
+        ? activeAgreements.filter((agreement) => agreement.agreementId === selectedAgreementId)
+        : activeAgreements,
+    [activeAgreements, selectedAgreementId]
+  );
+  const profileSummary = useMemo(() => {
+    const summary = {
+      total: 0,
+      agreementIds: new Set(),
+      condominiums: new Set(),
+      open: 0,
+      overdue: 0,
+      received: 0,
+      finalized: 0,
+      canceled: 0,
+      receivable: 0,
+      receivedValue: 0,
+    };
+
+    activeAgreements.forEach((agreement) => {
+      const status = agreement.effectiveStatus || agreement.status;
+      const value = getInstallmentValue(agreement);
+
+      summary.total += 1;
+      if (agreement.agreementId) summary.agreementIds.add(agreement.agreementId);
+      if (agreement.condominium) summary.condominiums.add(agreement.condominium);
+
+      if (status === "Recebido") {
+        summary.received += 1;
+        summary.receivedValue += agreement.receivedValue || value;
+      } else if (status === "Finalizado") {
+        summary.finalized += 1;
+      } else if (status === "Cancelado") {
+        summary.canceled += 1;
+      } else if (status === "Vencido") {
+        summary.overdue += 1;
+        summary.receivable += value;
+      } else {
+        summary.open += 1;
+        summary.receivable += value;
+      }
+    });
+
+    return {
+      ...summary,
+      agreementCount: summary.agreementIds.size,
+      condominiumCount: summary.condominiums.size,
+      condominiumList: [...summary.condominiums].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    };
+  }, [activeAgreements]);
+
+  useEffect(() => {
+    setSelectedAgreementId("");
+  }, [activeProfileKey]);
+
+  useEffect(() => {
+    setProfileScrollTop(0);
+    if (profileListRef.current) {
+      profileListRef.current.scrollTop = 0;
+    }
+  }, [normalizedSearch]);
+
+  useEffect(() => {
+    if (!selectedAgreementId) return;
+    if (!agreementOptions.some((agreement) => agreement.agreementId === selectedAgreementId)) {
+      setSelectedAgreementId("");
+    }
+  }, [agreementOptions, selectedAgreementId]);
+
+  return (
+    <section className="grid gap-4">
+      <div>
+        <h2 className="text-xl font-semibold tracking-normal text-white">Perfis</h2>
+        <p className="mt-1 text-sm text-zinc-400">
+          Pesquise uma pessoa da base para ver os acordos, valores e situacao dela.
+        </p>
+      </div>
+
+      <Card className="border-white/10 bg-white/[0.04] shadow-none">
+        <CardHeader className="border-b border-white/10 px-4 py-3">
+          <CardTitle className="text-base text-white">Buscar pessoa</CardTitle>
+          <CardDescription className="text-zinc-400">
+            Digite parte do nome e selecione um perfil encontrado.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 p-4 xl:grid-cols-[minmax(260px,420px)_1fr]">
+          <Field id="profileSearch" label="Nome" icon={<Search size={17} aria-hidden="true" />}>
+            <input
+              id="profileSearch"
+              className="h-full min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-zinc-500"
+              placeholder="Nome da pessoa"
+              value={search}
+              onChange={(event) => {
+                onSearchChange(event.target.value);
+                onSelectProfile("");
+              }}
+            />
+          </Field>
+
+          <div className="min-w-0">
+            <p className="mb-2 text-xs font-medium text-zinc-400">
+              {matchingProfiles.length} perfis encontrados
+            </p>
+            {matchingProfiles.length ? (
+              <div
+                ref={profileListRef}
+                className="h-56 overflow-y-auto pr-1"
+                onScroll={(event) => {
+                  const nextScrollTop = event.currentTarget.scrollTop;
+                  if (profileFrameRef.current) return;
+                  profileFrameRef.current = window.requestAnimationFrame(() => {
+                    setProfileScrollTop(nextScrollTop);
+                    profileFrameRef.current = null;
+                  });
+                }}
+              >
+                <div className="relative" style={{ height: matchingProfiles.length * PROFILE_ROW_HEIGHT }}>
+                  {profileTopSpacer ? <div className="absolute left-0 right-0" style={{ height: profileTopSpacer }} /> : null}
+                {visibleProfiles.map((profile, offset) => {
+                  const active = normalizeText(activeProfile) === profile.key;
+                  const profileIndex = profileStartIndex + offset;
+
+                  return (
+                    <button
+                      className={cn(
+                        "absolute left-0 right-0 grid min-h-[68px] min-w-0 gap-1 rounded-md border px-3 py-2 text-left transition",
+                        active
+                          ? "border-white/30 bg-white/[0.1] text-white"
+                          : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.07]"
+                      )}
+                      key={profile.key}
+                      style={{ top: profileIndex * PROFILE_ROW_HEIGHT }}
+                      type="button"
+                      onClick={() => onSelectProfile(profile.name)}
+                    >
+                      <span className="truncate text-sm font-medium">{profile.name}</span>
+                      <span className="text-xs text-zinc-500">
+                        {profile.total} registros, {profile.agreementCount} acordos
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        {formatCurrency(profile.receivable)} a receber
+                      </span>
+                    </button>
+                  );
+                })}
+                  {profileBottomSpacer ? (
+                    <div
+                      className="absolute left-0 right-0"
+                      style={{ top: profileEndIndex * PROFILE_ROW_HEIGHT, height: profileBottomSpacer }}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="grid min-h-[120px] place-items-center rounded-md border border-white/10 bg-white/[0.03] p-4 text-center text-sm text-zinc-400">
+                Nenhum perfil encontrado na base atual.
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {activeProfile ? (
+        <>
+          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7" aria-label="Resumo do perfil">
+            <Metric label="Registros do perfil" value={profileSummary.total} />
+            <Metric label="Acordos distintos" value={profileSummary.agreementCount} />
+            <Metric label="Condominios" value={profileSummary.condominiumCount} />
+            <Metric label="Em aberto" value={profileSummary.open} />
+            <Metric label="Vencidos" value={profileSummary.overdue} />
+            <Metric label="Valor recebido" value={formatCurrency(profileSummary.receivedValue)} />
+            <Metric label="Valor a receber" value={formatCurrency(profileSummary.receivable)} />
+          </section>
+
+          <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(260px,360px)_minmax(0,1fr)]">
+            <Card className="border-white/10 bg-white/[0.04] shadow-none">
+              <CardHeader className="border-b border-white/10 px-4 py-3">
+                <CardTitle className="truncate text-base text-white">{activeProfile}</CardTitle>
+                <CardDescription className="text-zinc-400">
+                  {profileSummary.total} registros em {profileSummary.condominiumCount} condominios.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 p-4">
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="secondary" className="bg-white/10 text-zinc-200">
+                    Recebidos: {profileSummary.received}
+                  </Badge>
+                  <Badge variant="secondary" className="bg-white/10 text-zinc-200">
+                    Finalizados: {profileSummary.finalized}
+                  </Badge>
+                  <Badge variant="secondary" className="bg-red-500/15 text-red-200">
+                    Vencidos: {profileSummary.overdue}
+                  </Badge>
+                  <Badge variant="secondary" className="bg-zinc-500/15 text-zinc-300">
+                    Cancelados: {profileSummary.canceled}
+                  </Badge>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-xs font-medium text-zinc-400">Condominios vinculados</p>
+                  {profileSummary.condominiumList.length ? (
+                    <div className="grid gap-2">
+                      {profileSummary.condominiumList.map((condominium) => (
+                        <div
+                          className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-zinc-300"
+                          key={condominium}
+                        >
+                          {condominium}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-zinc-500">Sem condominio informado.</p>
+                  )}
+                </div>
+
+                <div>
+                  <p className="mb-2 text-xs font-medium text-zinc-400">Acordos</p>
+                  <div className="grid max-h-72 gap-2 overflow-y-auto pr-1">
+                    <button
+                      className={cn(
+                        "grid min-h-[50px] rounded-md border px-3 py-2 text-left transition",
+                        !selectedAgreementId
+                          ? "border-white/30 bg-white/[0.1] text-white"
+                          : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.07]"
+                      )}
+                      type="button"
+                      onClick={() => setSelectedAgreementId("")}
+                    >
+                      <span className="text-sm font-medium">Todos</span>
+                      <span className="mt-1 text-xs text-zinc-500">{activeAgreements.length} parcelas/registros</span>
+                    </button>
+
+                    {agreementOptions.map((agreement) => {
+                      const active = selectedAgreementId === agreement.agreementId;
+                      const agreementStatusClassName =
+                        agreement.status === "Em andamento"
+                          ? "bg-yellow-500/15 text-yellow-100"
+                          : agreement.status === "Cancelado"
+                            ? "bg-zinc-500/15 text-zinc-300"
+                            : "bg-emerald-500/15 text-emerald-100";
+
+                      return (
+                        <button
+                          className={cn(
+                            "grid min-h-[62px] rounded-md border px-3 py-2 text-left transition",
+                            active
+                              ? "border-white/30 bg-white/[0.1] text-white"
+                              : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.07]"
+                          )}
+                          key={agreement.agreementId}
+                          type="button"
+                          onClick={() => setSelectedAgreementId(agreement.agreementId)}
+                        >
+                          <span className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold">Acordo {agreement.agreementId}</span>
+                            <Badge variant="secondary" className={agreementStatusClassName}>
+                              {agreement.status}
+                            </Badge>
+                          </span>
+                          <span className="mt-1 text-xs text-zinc-500">
+                            {agreement.total} parcelas/registros
+                          </span>
+                          <span className="mt-1 text-xs text-zinc-500">
+                            {formatCurrency(agreement.receivable)} a receber
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="min-w-0 overflow-hidden border-white/10 bg-white/[0.04] shadow-none">
+              <CardHeader className="flex flex-col gap-3 border-b border-white/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle className="text-base text-white">
+                    {selectedAgreementId ? `Parcelas do acordo ${selectedAgreementId}` : "Acordos do perfil"}
+                  </CardTitle>
+                  <CardDescription className="text-zinc-400">
+                    {selectedAgreementAgreements.length} registros encontrados
+                  </CardDescription>
+                </div>
+                <Badge variant="outline" className="w-fit gap-1.5 rounded-md border-white/15 text-zinc-200">
+                  <CircleDollarSign size={14} aria-hidden="true" />
+                  {formatCurrency(profileSummary.receivable)}
+                </Badge>
+              </CardHeader>
+              <ProfileAgreementsList agreements={selectedAgreementAgreements} />
+            </Card>
+          </section>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -446,7 +953,17 @@ function App() {
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [activeView, setActiveView] = useState("overview");
+  const [profileSearch, setProfileSearch] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState("");
   const [data, setData] = useState({
+    updatedAt: null,
+    total: 0,
+    filtered: 0,
+    condominiums: [],
+    statuses: [],
+    agreements: [],
+  });
+  const [allData, setAllData] = useState({
     updatedAt: null,
     total: 0,
     filtered: 0,
@@ -473,12 +990,24 @@ function App() {
   async function loadAgreements() {
     const response = await fetch(`${API_URL}/api/agreements${query ? `?${query}` : ""}`);
     if (!response.ok) throw new Error("Não foi possível carregar os acordos.");
-    setData(await response.json());
+    const result = await response.json();
+    setData(result);
+    if (!query) setAllData(result);
+  }
+
+  async function loadProfileBase() {
+    const response = await fetch(`${API_URL}/api/agreements`);
+    if (!response.ok) throw new Error("Nao foi possivel carregar a base de perfis.");
+    setAllData(await response.json());
   }
 
   useEffect(() => {
     loadAgreements().catch((currentError) => setError(currentError.message));
   }, [query]);
+
+  useEffect(() => {
+    loadProfileBase().catch((currentError) => setError(currentError.message));
+  }, []);
 
   async function handleImport(event) {
     event.preventDefault();
@@ -503,7 +1032,7 @@ function App() {
         `Importação concluída: ${result.created} novos, ${result.updated} atualizados, ${result.total} no total.`
       );
       setFile(null);
-      await loadAgreements();
+      await Promise.all([loadAgreements(), loadProfileBase()]);
     } catch (currentError) {
       setError(currentError.message);
     } finally {
@@ -528,7 +1057,9 @@ function App() {
       setFeedback(`Exclusão concluída: ${result.deleted} acordos removidos.`);
       setDeleteConfirmation("");
       setDeleteOpen(false);
-      await loadAgreements();
+      setProfileSearch("");
+      setSelectedProfile("");
+      await Promise.all([loadAgreements(), loadProfileBase()]);
     } catch (currentError) {
       setError(currentError.message);
     } finally {
@@ -540,7 +1071,7 @@ function App() {
     () =>
       data.agreements.reduce(
         (summary, agreement) => {
-          const value = agreement.value || 0;
+          const value = getInstallmentValue(agreement);
           const receivedValue = agreement.receivedValue || 0;
           const status = agreement.effectiveStatus || agreement.status;
 
@@ -555,7 +1086,7 @@ function App() {
           }
 
           if (status === "Em aberto" || status === "Vencido") {
-            summary.receivable += agreement.updatedValue || value;
+            summary.receivable += value;
           }
 
           return summary;
@@ -595,7 +1126,7 @@ function App() {
 
       if (status === "Recebido") {
         current.received += 1;
-        current.recoveredValue += agreement.receivedValue || agreement.value || 0;
+        current.recoveredValue += agreement.receivedValue || getInstallmentValue(agreement);
       }
       if (status === "Finalizado") current.finalized += 1;
       if (status === "Cancelado") current.canceled += 1;
@@ -611,7 +1142,7 @@ function App() {
         const overdueDays = daysBetween(agreement.dueDate, todayIso);
 
         current.overdue += 1;
-        current.receivable += agreement.updatedValue || agreement.value || 0;
+        current.receivable += getInstallmentValue(agreement);
         current.overdueDaysSum += overdueDays || 0;
         current.overdueDaysCount += 1;
       }
@@ -693,6 +1224,17 @@ function App() {
             >
               <WalletCards size={17} aria-hidden="true" />
               Visão geral
+            </button>
+            <button
+              className={cn(
+                "flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium transition hover:bg-white/[0.05] hover:text-zinc-200",
+                activeView === "profiles" ? "bg-white/[0.08] text-white" : "text-zinc-500"
+              )}
+              type="button"
+              onClick={() => setActiveView("profiles")}
+            >
+              <UserRound size={17} aria-hidden="true" />
+              Perfis
             </button>
             <button
               className={cn(
@@ -858,6 +1400,14 @@ function App() {
               )}
             </Card>
               </>
+            ) : activeView === "profiles" ? (
+              <ProfilesView
+                agreements={allData.agreements}
+                search={profileSearch}
+                onSearchChange={setProfileSearch}
+                selectedProfile={selectedProfile}
+                onSelectProfile={setSelectedProfile}
+              />
             ) : (
               <section className="grid gap-4">
                 <div>
