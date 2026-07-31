@@ -1,21 +1,26 @@
 import cors from "cors";
 import express from "express";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import multer from "multer";
 import readXlsxFile from "read-excel-file/node";
+import { get, put } from "@vercel/blob";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 3001);
 const DATA_DIR = path.join(__dirname, "data");
-const UPLOAD_DIR = path.join(__dirname, "uploads");
+const UPLOAD_DIR = process.env.VERCEL ? os.tmpdir() : path.join(__dirname, "uploads");
 const DB_FILE = path.join(DATA_DIR, "acordos.json");
+const DB_BLOB_PATH = process.env.DB_BLOB_PATH || "data/acordos.json";
 const G5_USERS = new Set(["jvc", "jvr", "sys"]);
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!process.env.VERCEL) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
 const upload = multer({
   dest: UPLOAD_DIR,
@@ -26,15 +31,65 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function readDb() {
+function emptyDb() {
+  return { updatedAt: null, agreements: [] };
+}
+
+function useBlobStorage() {
+  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+}
+
+function isMissingBlobError(error) {
+  const status = error?.status || error?.statusCode || error?.response?.status;
+  return status === 404 || /not found|404/i.test(String(error?.message || ""));
+}
+
+async function readStreamText(stream) {
+  if (!stream) return "";
+  if (typeof stream.getReader === "function") {
+    return new Response(stream).text();
+  }
+
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readDb() {
+  if (useBlobStorage()) {
+    try {
+      const blob = await get(DB_BLOB_PATH);
+      const text = await readStreamText(blob.stream);
+      return text ? JSON.parse(text) : emptyDb();
+    } catch (error) {
+      if (isMissingBlobError(error)) return emptyDb();
+      throw error;
+    }
+  }
+
   if (!fs.existsSync(DB_FILE)) {
-    return { updatedAt: null, agreements: [] };
+    return emptyDb();
   }
 
   return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
 }
 
-function writeDb(db) {
+async function writeDb(db) {
+  if (useBlobStorage()) {
+    await put(DB_BLOB_PATH, JSON.stringify(db), {
+      access: "private",
+      allowOverwrite: true,
+      contentType: "application/json",
+    });
+    return;
+  }
+
+  if (process.env.VERCEL) {
+    throw new Error("Configure BLOB_READ_WRITE_TOKEN na Vercel para gravar os acordos.");
+  }
+
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf8");
 }
 
@@ -398,39 +453,47 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/agreements", (req, res) => {
-  const db = readDb();
-  const referenceDate = todayIso();
-  const enrichedAgreements = db.agreements.map((agreement) => withEffectiveStatus(agreement, referenceDate));
-  const agreements = applyFilters(enrichedAgreements, req.query);
-  const condominiums = [...new Set(enrichedAgreements.map((item) => item.condominium).filter(Boolean))].sort(
-    (a, b) => a.localeCompare(b, "pt-BR")
-  );
-  const statuses = [...new Set(enrichedAgreements.map((item) => item.status).filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, "pt-BR")
-  );
-  const teams = [...new Set(enrichedAgreements.flatMap((item) => item.tags || []).filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, "pt-BR")
-  );
+app.get("/api/agreements", async (req, res) => {
+  try {
+    const db = await readDb();
+    const referenceDate = todayIso();
+    const enrichedAgreements = db.agreements.map((agreement) => withEffectiveStatus(agreement, referenceDate));
+    const agreements = applyFilters(enrichedAgreements, req.query);
+    const condominiums = [...new Set(enrichedAgreements.map((item) => item.condominium).filter(Boolean))].sort(
+      (a, b) => a.localeCompare(b, "pt-BR")
+    );
+    const statuses = [...new Set(enrichedAgreements.map((item) => item.status).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "pt-BR")
+    );
+    const teams = [...new Set(enrichedAgreements.flatMap((item) => item.tags || []).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "pt-BR")
+    );
 
-  res.json({
-    updatedAt: db.updatedAt,
-    total: db.agreements.length,
-    filtered: agreements.length,
-    condominiums,
-    statuses,
-    teams,
-    agreements,
-  });
+    res.json({
+      updatedAt: db.updatedAt,
+      total: db.agreements.length,
+      filtered: agreements.length,
+      condominiums,
+      statuses,
+      teams,
+      agreements,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Não foi possível carregar os acordos.", detail: error.message });
+  }
 });
 
-app.delete("/api/agreements", (_req, res) => {
-  const db = readDb();
-  const deleted = db.agreements.length;
+app.delete("/api/agreements", async (_req, res) => {
+  try {
+    const db = await readDb();
+    const deleted = db.agreements.length;
 
-  writeDb({ updatedAt: new Date().toISOString(), agreements: [] });
+    await writeDb({ updatedAt: new Date().toISOString(), agreements: [] });
 
-  res.json({ deleted, total: 0 });
+    res.json({ deleted, total: 0 });
+  } catch (error) {
+    res.status(500).json({ error: "Não foi possível excluir os acordos.", detail: error.message });
+  }
 });
 
 app.post("/api/import", upload.single("file"), async (req, res) => {
@@ -442,7 +505,7 @@ app.post("/api/import", upload.single("file"), async (req, res) => {
     const { sheetName, rows } = await parseSpreadsheet(req.file.path, req.file.originalname);
     const imported = rows.map(buildAgreement).filter(Boolean);
 
-    const db = readDb();
+    const db = await readDb();
     const byId = new Map(db.agreements.map((agreement) => [agreement.id, agreement]));
     let created = 0;
     let updated = 0;
@@ -462,7 +525,7 @@ app.post("/api/import", upload.single("file"), async (req, res) => {
       return String(a.agreementId).localeCompare(String(b.agreementId), "pt-BR", { numeric: true });
     });
 
-    writeDb({ updatedAt: new Date().toISOString(), agreements });
+    await writeDb({ updatedAt: new Date().toISOString(), agreements });
 
     res.json({
       sheetName,
@@ -479,6 +542,10 @@ app.post("/api/import", upload.single("file"), async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`API da carteira de acordos em http://127.0.0.1:${PORT}`);
-});
+if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`API da carteira de acordos em http://127.0.0.1:${PORT}`);
+  });
+}
+
+export default app;
