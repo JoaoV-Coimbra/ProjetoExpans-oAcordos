@@ -17,6 +17,7 @@ coverage/
 .env
 .env.*
 !.env.example
+.vercel/
 
 # Runtime data and imported files
 server/data/**
