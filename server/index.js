@@ -210,6 +210,24 @@ async function writeStreamToFile(stream, filePath) {
   await pipeline(source, fs.createWriteStream(filePath));
 }
 
+async function getUploadedBlob(uploadedBlob) {
+  const references = [uploadedBlob.url, uploadedBlob.downloadUrl, uploadedBlob.pathname].filter(Boolean);
+  let lastError = null;
+
+  for (const reference of references) {
+    try {
+      const blob = await get(reference, privateBlobOptions({ useCache: false }));
+      if (blob?.stream) return { blob, reference };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const attempted = references.length ? references.join(", ") : "nenhuma referência";
+  const reason = lastError ? ` ${lastError.message}` : "";
+  throw new Error(`Arquivo do Blob não encontrado. Tentativas: ${attempted}.${reason}`);
+}
+
 async function parseSpreadsheet(filePath, originalName) {
   const extension = path.extname(originalName).toLowerCase();
 
@@ -543,24 +561,21 @@ app.post("/api/blob-upload", async (req, res) => {
 });
 
 app.post("/api/import-from-blob", async (req, res) => {
-  const { pathname, url, originalName } = req.body || {};
-  const blobReference = url || pathname;
+  const { blob: uploadedBlob = {}, pathname, url, downloadUrl, originalName } = req.body || {};
+  const blobPayload = { pathname, url, downloadUrl, ...uploadedBlob };
 
-  if (!blobReference || !originalName) {
+  if (!originalName || ![blobPayload.url, blobPayload.downloadUrl, blobPayload.pathname].some(Boolean)) {
     return res.status(400).json({ error: "Arquivo do Blob não informado." });
   }
 
   const tempFilePath = path.join(os.tmpdir(), `import-${crypto.randomUUID()}${path.extname(originalName)}`);
 
   try {
-    const blob = await get(blobReference, privateBlobOptions());
-    if (!blob?.stream) {
-      throw new Error(`Arquivo do Blob não encontrado: ${pathname || url}`);
-    }
+    const { blob, reference } = await getUploadedBlob(blobPayload);
     await writeStreamToFile(blob.stream, tempFilePath);
     const result = await importAgreementsFromFile(tempFilePath, originalName);
 
-    await del(blobReference, privateBlobOptions()).catch(() => {});
+    await del(blobPayload.pathname || reference, privateBlobOptions()).catch(() => {});
 
     res.json(result);
   } catch (error) {
