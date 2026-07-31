@@ -47,6 +47,10 @@ function blobOptions(extra = {}) {
   return { token: process.env.BLOB_READ_WRITE_TOKEN, ...extra };
 }
 
+function privateBlobOptions(extra = {}) {
+  return blobOptions({ access: "private", ...extra });
+}
+
 function isMissingBlobError(error) {
   const status = error?.status || error?.statusCode || error?.response?.status;
   return status === 404 || /not found|404/i.test(String(error?.message || ""));
@@ -68,7 +72,7 @@ async function readStreamText(stream) {
 async function readDb() {
   if (useBlobStorage()) {
     try {
-      const blob = await get(DB_BLOB_PATH, blobOptions());
+      const blob = await get(DB_BLOB_PATH, privateBlobOptions());
       const text = await readStreamText(blob.stream);
       return text ? JSON.parse(text) : emptyDb();
     } catch (error) {
@@ -519,7 +523,6 @@ app.post("/api/blob-upload", async (req, res) => {
         }
 
         return {
-          access: "private",
           allowedContentTypes: [
             "text/csv",
             "application/csv",
@@ -549,11 +552,11 @@ app.post("/api/import-from-blob", async (req, res) => {
   const tempFilePath = path.join(os.tmpdir(), `import-${crypto.randomUUID()}${path.extname(originalName)}`);
 
   try {
-    const blob = await get(pathname, blobOptions());
+    const blob = await get(pathname, privateBlobOptions());
     await writeStreamToFile(blob.stream, tempFilePath);
     const result = await importAgreementsFromFile(tempFilePath, originalName);
 
-    await del(pathname, blobOptions()).catch(() => {});
+    await del(pathname, privateBlobOptions()).catch(() => {});
 
     res.json(result);
   } catch (error) {
