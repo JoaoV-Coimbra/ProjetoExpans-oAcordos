@@ -1,11 +1,15 @@
 import cors from "cors";
 import express from "express";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import multer from "multer";
 import readXlsxFile from "read-excel-file/node";
-import { get, put } from "@vercel/blob";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { del, get, put } from "@vercel/blob";
+import { handleUpload } from "@vercel/blob/client";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -191,6 +195,11 @@ function getCellPrimitive(value) {
   if (value === null || value === undefined) return "";
   if (value instanceof Date) return value;
   return String(value);
+}
+
+async function writeStreamToFile(stream, filePath) {
+  const source = typeof stream?.getReader === "function" ? Readable.fromWeb(stream) : stream;
+  await pipeline(source, fs.createWriteStream(filePath));
 }
 
 async function parseSpreadsheet(filePath, originalName) {
@@ -390,7 +399,6 @@ function buildAgreement(row) {
     user,
     tags,
     status,
-    raw: row,
     importedAt: new Date().toISOString(),
   };
 }
@@ -496,45 +504,67 @@ app.delete("/api/agreements", async (_req, res) => {
   }
 });
 
+app.post("/api/blob-upload", async (req, res) => {
+  try {
+    const jsonResponse = await handleUpload({
+      body: req.body,
+      request: req,
+      onBeforeGenerateToken: async (pathname) => {
+        if (!pathname.startsWith("imports/")) {
+          throw new Error("Caminho de upload inválido.");
+        }
+
+        return {
+          allowedContentTypes: [
+            "text/csv",
+            "application/csv",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/octet-stream",
+          ],
+          maximumSizeInBytes: 50 * 1024 * 1024,
+          addRandomSuffix: false,
+        };
+      },
+    });
+
+    res.json(jsonResponse);
+  } catch (error) {
+    res.status(400).json({ error: "Não foi possível autorizar o upload.", detail: error.message });
+  }
+});
+
+app.post("/api/import-from-blob", async (req, res) => {
+  const { pathname, originalName } = req.body || {};
+
+  if (!pathname || !originalName) {
+    return res.status(400).json({ error: "Arquivo do Blob não informado." });
+  }
+
+  const tempFilePath = path.join(os.tmpdir(), `import-${crypto.randomUUID()}${path.extname(originalName)}`);
+
+  try {
+    const blob = await get(pathname);
+    await writeStreamToFile(blob.stream, tempFilePath);
+    const result = await importAgreementsFromFile(tempFilePath, originalName);
+
+    await del(pathname).catch(() => {});
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: "Não foi possível importar a planilha.", detail: error.message });
+  } finally {
+    fs.unlink(tempFilePath, () => {});
+  }
+});
+
 app.post("/api/import", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "Envie uma planilha no campo 'file'." });
   }
 
   try {
-    const { sheetName, rows } = await parseSpreadsheet(req.file.path, req.file.originalname);
-    const imported = rows.map(buildAgreement).filter(Boolean);
-
-    const db = await readDb();
-    const byId = new Map(db.agreements.map((agreement) => [agreement.id, agreement]));
-    let created = 0;
-    let updated = 0;
-
-    imported.forEach((agreement) => {
-      if (byId.has(agreement.id)) {
-        updated += 1;
-      } else {
-        created += 1;
-      }
-      byId.set(agreement.id, { ...byId.get(agreement.id), ...agreement });
-    });
-
-    const agreements = [...byId.values()].sort((a, b) => {
-      const dateCompare = String(a.dueDate).localeCompare(String(b.dueDate));
-      if (dateCompare !== 0) return dateCompare;
-      return String(a.agreementId).localeCompare(String(b.agreementId), "pt-BR", { numeric: true });
-    });
-
-    await writeDb({ updatedAt: new Date().toISOString(), agreements });
-
-    res.json({
-      sheetName,
-      rows: rows.length,
-      imported: imported.length,
-      created,
-      updated,
-      total: agreements.length,
-    });
+    res.json(await importAgreementsFromFile(req.file.path, req.file.originalname));
   } catch (error) {
     res.status(500).json({ error: "Não foi possível importar a planilha.", detail: error.message });
   } finally {
@@ -546,6 +576,44 @@ if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`API da carteira de acordos em http://127.0.0.1:${PORT}`);
   });
+}
+
+async function importAgreementsFromFile(filePath, originalName) {
+  const { sheetName, rows } = await parseSpreadsheet(filePath, originalName);
+  const imported = rows.map(buildAgreement).filter(Boolean);
+
+  const db = await readDb();
+  const byId = new Map(db.agreements.map((agreement) => [agreement.id, agreement]));
+  let created = 0;
+  let updated = 0;
+
+  imported.forEach((agreement) => {
+    if (byId.has(agreement.id)) {
+      updated += 1;
+    } else {
+      created += 1;
+    }
+    const nextAgreement = { ...byId.get(agreement.id), ...agreement };
+    delete nextAgreement.raw;
+    byId.set(agreement.id, nextAgreement);
+  });
+
+  const agreements = [...byId.values()].sort((a, b) => {
+    const dateCompare = String(a.dueDate).localeCompare(String(b.dueDate));
+    if (dateCompare !== 0) return dateCompare;
+    return String(a.agreementId).localeCompare(String(b.agreementId), "pt-BR", { numeric: true });
+  });
+
+  await writeDb({ updatedAt: new Date().toISOString(), agreements });
+
+  return {
+    sheetName,
+    rows: rows.length,
+    imported: imported.length,
+    created,
+    updated,
+    total: agreements.length,
+  };
 }
 
 export default app;

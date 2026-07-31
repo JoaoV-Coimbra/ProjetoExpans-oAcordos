@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { upload as uploadBlob } from "@vercel/blob/client";
 import {
   Building2,
   CalendarDays,
@@ -65,6 +66,22 @@ function getInstallmentValue(agreement) {
 
 function getRecoveryRate(receivedValue, recoverableValue) {
   return recoverableValue > 0 ? receivedValue / recoverableValue : null;
+}
+
+function makeBlobPath(file) {
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `imports/${Date.now()}-${safeName}`;
+}
+
+async function readApiResponse(response, fallbackMessage) {
+  const contentType = response.headers.get("content-type") || "";
+  const result = contentType.includes("application/json") ? await response.json() : { detail: await response.text() };
+
+  if (!response.ok) {
+    throw new Error(result.error || result.detail || fallbackMessage);
+  }
+
+  return result;
 }
 
 function normalizeText(value) {
@@ -1184,16 +1201,33 @@ function App() {
     setError("");
     setFeedback("");
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const response = await fetch(`${API_URL}/api/import`, {
-        method: "POST",
-        body: formData,
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Falha ao importar a planilha.");
+      let result;
+
+      if (import.meta.env.DEV) {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch(`${API_URL}/api/import`, {
+          method: "POST",
+          body: formData,
+        });
+        result = await readApiResponse(response, "Falha ao importar a planilha.");
+      } else {
+        const blob = await uploadBlob(makeBlobPath(file), file, {
+          access: "private",
+          handleUploadUrl: `${API_URL}/api/blob-upload`,
+          multipart: true,
+          contentType: file.type || "application/octet-stream",
+        });
+
+        const response = await fetch(`${API_URL}/api/import-from-blob`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pathname: blob.pathname, originalName: file.name }),
+        });
+        result = await readApiResponse(response, "Falha ao importar a planilha.");
+      }
 
       setFeedback(
         `Importação concluída: ${result.created} novos, ${result.updated} atualizados, ${result.total} no total.`
@@ -1218,8 +1252,7 @@ function App() {
       const response = await fetch(`${API_URL}/api/agreements`, {
         method: "DELETE",
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Falha ao excluir os acordos.");
+      const result = await readApiResponse(response, "Falha ao excluir os acordos.");
 
       setFeedback(`Exclusão concluída: ${result.deleted} acordos removidos.`);
       setDeleteConfirmation("");
