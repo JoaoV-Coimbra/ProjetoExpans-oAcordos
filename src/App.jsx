@@ -1,25 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { upload as uploadBlob } from "@vercel/blob/client";
 import {
   Building2,
   CalendarDays,
   ChevronDown,
   CircleDollarSign,
-  FileSpreadsheet,
   FilterX,
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  RefreshCw,
   Search,
   Trash2,
-  UploadCloud,
   UserRound,
   WalletCards,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -66,11 +64,6 @@ function getInstallmentValue(agreement) {
 
 function getRecoveryRate(receivedValue, recoverableValue) {
   return recoverableValue > 0 ? receivedValue / recoverableValue : null;
-}
-
-function makeBlobPath(file) {
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `imports/${Date.now()}-${safeName}`;
 }
 
 async function readApiResponse(response, fallbackMessage) {
@@ -1128,7 +1121,6 @@ function DueDatesView({ agreements }) {
 }
 
 function App() {
-  const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -1195,46 +1187,20 @@ function App() {
     loadProfileBase().catch((currentError) => setError(currentError.message));
   }, []);
 
-  async function handleImport(event) {
-    event.preventDefault();
-    if (!file) return;
-
+  async function handleImport() {
     setLoading(true);
     setError("");
     setFeedback("");
 
     try {
-      let result;
-
-      if (import.meta.env.DEV) {
-        const formData = new FormData();
-        formData.append("file", file);
-
-        const response = await fetch(`${API_URL}/api/import`, {
-          method: "POST",
-          body: formData,
-        });
-        result = await readApiResponse(response, "Falha ao importar a planilha.");
-      } else {
-        const blob = await uploadBlob(makeBlobPath(file), file, {
-          access: "private",
-          handleUploadUrl: `${API_URL}/api/blob-upload`,
-          multipart: true,
-          contentType: file.type || "application/octet-stream",
-        });
-
-        const response = await fetch(`${API_URL}/api/import-from-blob`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ blob, originalName: file.name }),
-        });
-        result = await readApiResponse(response, "Falha ao importar a planilha.");
-      }
+      const response = await fetch(`${API_URL}/api/import-from-storage`, {
+        method: "POST",
+      });
+      const result = await readApiResponse(response, "Falha ao atualizar a base.");
 
       setFeedback(
         `Importação concluída: ${result.created} novos, ${result.updated} atualizados, ${result.total} no total.`
       );
-      setFile(null);
       await Promise.all([loadAgreements(), loadProfileBase()]);
     } catch (currentError) {
       setError(currentError.message);
@@ -1501,25 +1467,10 @@ function App() {
                 </p>
               </div>
 
-              <form className="grid gap-2 sm:grid-cols-[auto_minmax(180px,280px)_auto]" onSubmit={handleImport}>
-                <label className={cn(buttonVariants({ variant: "outline" }), "relative cursor-pointer overflow-hidden border-white/15 bg-transparent text-white hover:bg-white/10")}>
-                  <FileSpreadsheet aria-hidden="true" />
-                  Planilha
-                  <input
-                    className="absolute inset-0 cursor-pointer opacity-0"
-                    type="file"
-                    accept=".xlsx,.csv"
-                    onChange={(event) => setFile(event.target.files?.[0] || null)}
-                  />
-                </label>
-                <div className="flex h-10 items-center rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-400">
-                  <span className="truncate">{file?.name || "Nenhum arquivo selecionado"}</span>
-                </div>
-                <Button disabled={!file || loading} type="submit">
-                  <UploadCloud aria-hidden="true" />
-                  {loading ? "Importando" : "Importar"}
-                </Button>
-              </form>
+              <Button disabled={loading} type="button" onClick={handleImport}>
+                <RefreshCw aria-hidden="true" className={loading ? "animate-spin" : ""} />
+                {loading ? "Atualizando" : "Atualizar base"}
+              </Button>
             </div>
           </header>
 

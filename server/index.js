@@ -19,6 +19,7 @@ const DATA_DIR = path.join(__dirname, "data");
 const UPLOAD_DIR = process.env.VERCEL ? os.tmpdir() : path.join(__dirname, "uploads");
 const DB_FILE = path.join(DATA_DIR, "acordos.json");
 const DB_BLOB_PATH = process.env.DB_BLOB_PATH || "data/acordos.json";
+const IMPORT_BLOB_PATH = process.env.IMPORT_BLOB_PATH || "imports/acordos.csv";
 const G5_USERS = new Set(["jvc", "jvr", "sys"]);
 
 if (!process.env.VERCEL) {
@@ -227,6 +228,23 @@ async function getUploadedBlob(uploadedBlob) {
   const attempted = references.length ? references.join(", ") : "nenhuma referência";
   const reason = lastError ? ` ${lastError.message}` : "";
   throw new Error(`Arquivo do Blob não encontrado. Tentativas: ${attempted}.${reason}`);
+}
+
+async function getImportSpreadsheetBlob() {
+  if (!useBlobStorage()) {
+    throw new Error("Configure BLOB_READ_WRITE_TOKEN na Vercel para ler a planilha do Blob.");
+  }
+
+  const blob = await get(IMPORT_BLOB_PATH, privateBlobOptions({ useCache: false }));
+  if (!blob?.stream) {
+    throw new Error(`Planilha fixa nao encontrada no Blob em "${IMPORT_BLOB_PATH}".`);
+  }
+
+  return blob;
+}
+
+function getImportOriginalName() {
+  return path.basename(IMPORT_BLOB_PATH.split("?")[0]) || "acordos.csv";
 }
 
 async function parseSpreadsheet(filePath, originalName) {
@@ -581,6 +599,24 @@ app.post("/api/import-from-blob", async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: "Não foi possível importar a planilha.", detail: error.message });
+  } finally {
+    fs.unlink(tempFilePath, () => {});
+  }
+});
+
+app.post("/api/import-from-storage", async (_req, res) => {
+  const originalName = getImportOriginalName();
+  const extension = path.extname(originalName) || ".csv";
+  const tempFilePath = path.join(os.tmpdir(), `storage-import-${crypto.randomUUID()}${extension}`);
+
+  try {
+    const blob = await getImportSpreadsheetBlob();
+    await writeStreamToFile(blob.stream, tempFilePath);
+    const result = await importAgreementsFromFile(tempFilePath, originalName);
+
+    res.json({ ...result, source: IMPORT_BLOB_PATH });
+  } catch (error) {
+    res.status(500).json({ error: "Nao foi possivel importar a planilha fixa do Blob.", detail: error.message });
   } finally {
     fs.unlink(tempFilePath, () => {});
   }
