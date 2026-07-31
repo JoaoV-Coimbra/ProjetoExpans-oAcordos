@@ -543,20 +543,24 @@ app.post("/api/blob-upload", async (req, res) => {
 });
 
 app.post("/api/import-from-blob", async (req, res) => {
-  const { pathname, originalName } = req.body || {};
+  const { pathname, url, originalName } = req.body || {};
+  const blobReference = url || pathname;
 
-  if (!pathname || !originalName) {
+  if (!blobReference || !originalName) {
     return res.status(400).json({ error: "Arquivo do Blob não informado." });
   }
 
   const tempFilePath = path.join(os.tmpdir(), `import-${crypto.randomUUID()}${path.extname(originalName)}`);
 
   try {
-    const blob = await get(pathname, privateBlobOptions());
+    const blob = await get(blobReference, privateBlobOptions());
+    if (!blob?.stream) {
+      throw new Error(`Arquivo do Blob não encontrado: ${pathname || url}`);
+    }
     await writeStreamToFile(blob.stream, tempFilePath);
     const result = await importAgreementsFromFile(tempFilePath, originalName);
 
-    await del(pathname, privateBlobOptions()).catch(() => {});
+    await del(blobReference, privateBlobOptions()).catch(() => {});
 
     res.json(result);
   } catch (error) {

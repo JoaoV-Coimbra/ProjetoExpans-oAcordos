@@ -1226,7 +1226,7 @@ function App() {
         const response = await fetch(`${API_URL}/api/import-from-blob`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pathname: blob.pathname, originalName: file.name }),
+          body: JSON.stringify({ pathname: blob.pathname, url: blob.url, originalName: file.name }),
         });
         result = await readApiResponse(response, "Falha ao importar a planilha.");
       }
