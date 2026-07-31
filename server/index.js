@@ -73,6 +73,7 @@ async function readDb() {
   if (useBlobStorage()) {
     try {
       const blob = await get(DB_BLOB_PATH, privateBlobOptions());
+      if (!blob?.stream) return emptyDb();
       const text = await readStreamText(blob.stream);
       return text ? JSON.parse(text) : emptyDb();
     } catch (error) {
