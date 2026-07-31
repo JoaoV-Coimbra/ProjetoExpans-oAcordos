@@ -12,6 +12,7 @@ const PORT = Number(process.env.PORT || 3001);
 const DATA_DIR = path.join(__dirname, "data");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DB_FILE = path.join(DATA_DIR, "acordos.json");
+const G5_USERS = new Set(["jvc", "jvr", "sys"]);
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -89,6 +90,10 @@ function parseCurrency(value) {
 
 function parseBoolean(value) {
   return ["true", "sim", "1", "yes"].includes(normalizeText(value));
+}
+
+function getAgreementTags(user) {
+  return G5_USERS.has(normalizeText(user)) ? ["G5"] : [];
 }
 
 function todayIso() {
@@ -289,6 +294,8 @@ function buildAgreement(row) {
   const finalized = parseBoolean(getValue(row, ["Finalizado"]));
   const administrator = String(getValue(row, ["Administradora"])).trim();
   const office = String(getValue(row, ["Escritorio", "Escritório"])).trim();
+  const user = String(getValue(row, ["Usuario", "User"])).trim();
+  const tags = getAgreementTags(user);
   const isAgreementActive = parseBoolean(getValue(row, ["Acordo__2"]));
 
   let status = "Em aberto";
@@ -325,6 +332,8 @@ function buildAgreement(row) {
     isAgreementActive,
     administrator,
     office,
+    user,
+    tags,
     status,
     raw: row,
     importedAt: new Date().toISOString(),
@@ -334,6 +343,7 @@ function buildAgreement(row) {
 function applyFilters(agreements, query) {
   const condominium = normalizeText(query.condominium);
   const status = normalizeText(query.status);
+  const team = normalizeText(query.team);
   const search = normalizeText(query.search);
   const dueFrom = query.dueFrom || "";
   const dueTo = query.dueTo || "";
@@ -344,6 +354,10 @@ function applyFilters(agreements, query) {
     }
 
     if (status && normalizeText(agreement.effectiveStatus || agreement.status) !== status) {
+      return false;
+    }
+
+    if (team && !(agreement.tags || []).some((tag) => normalizeText(tag) === team)) {
       return false;
     }
 
@@ -366,9 +380,11 @@ function applyFilters(agreements, query) {
           agreement.unit,
           agreement.admUnit,
           agreement.administrator,
+          agreement.user,
           agreement.status,
           agreement.effectiveStatus,
           agreement.correctionStatus,
+          ...(agreement.tags || []),
         ].join(" ")
       );
       if (!haystack.includes(search)) return false;
@@ -393,6 +409,9 @@ app.get("/api/agreements", (req, res) => {
   const statuses = [...new Set(enrichedAgreements.map((item) => item.status).filter(Boolean))].sort((a, b) =>
     a.localeCompare(b, "pt-BR")
   );
+  const teams = [...new Set(enrichedAgreements.flatMap((item) => item.tags || []).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, "pt-BR")
+  );
 
   res.json({
     updatedAt: db.updatedAt,
@@ -400,6 +419,7 @@ app.get("/api/agreements", (req, res) => {
     filtered: agreements.length,
     condominiums,
     statuses,
+    teams,
     agreements,
   });
 });

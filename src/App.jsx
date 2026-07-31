@@ -49,8 +49,22 @@ function formatCurrency(value) {
   return typeof value === "number" ? currencyFormatter.format(value) : "-";
 }
 
+function formatPercentage(value) {
+  if (!Number.isFinite(value)) return "-";
+
+  return new Intl.NumberFormat("pt-BR", {
+    style: "percent",
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
 function getInstallmentValue(agreement) {
   return agreement.updatedValue ?? agreement.value ?? 0;
+}
+
+function getRecoveryRate(receivedValue, recoverableValue) {
+  return recoverableValue > 0 ? receivedValue / recoverableValue : null;
 }
 
 function normalizeText(value) {
@@ -91,12 +105,25 @@ function formatDays(value) {
   return `${rounded} ${rounded === 1 ? "dia" : "dias"}`;
 }
 
+function addDaysIso(dateIso, amount) {
+  const date = new Date(`${dateIso}T00:00:00`);
+  date.setDate(date.getDate() + amount);
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 function Metric({ label, value }) {
   return (
     <Card className="min-h-[104px] border-white/10 bg-white/[0.04] shadow-none">
       <CardContent className="p-4">
         <p className="text-xs font-medium text-zinc-400">{label}</p>
-        <p className="mt-4 break-words text-2xl font-semibold tracking-normal text-white">{value}</p>
+        <p className="mt-4 whitespace-nowrap text-[clamp(1rem,1.05vw,1.5rem)] font-semibold tracking-normal text-white">
+          {value}
+        </p>
       </CardContent>
     </Card>
   );
@@ -237,6 +264,17 @@ function DropdownFilter({ id, label, value, options, onChange }) {
   );
 }
 
+function AgreementTagBadges({ tags }) {
+  const visibleTags = (tags || []).filter(Boolean);
+  if (!visibleTags.length) return null;
+
+  return visibleTags.map((tag) => (
+    <Badge variant="secondary" className="bg-cyan-500/15 text-cyan-100" key={tag}>
+      {tag}
+    </Badge>
+  ));
+}
+
 const AgreementRow = React.memo(function AgreementRow({ agreement }) {
   const status = agreement.effectiveStatus || agreement.status;
   const statusClassName =
@@ -272,13 +310,16 @@ const AgreementRow = React.memo(function AgreementRow({ agreement }) {
       <TableCell className="text-zinc-300">{formatDate(agreement.receiptDate)}</TableCell>
       <TableCell className="text-zinc-300">{formatCurrency(getInstallmentValue(agreement))}</TableCell>
       <TableCell>
-        {status ? (
-          <Badge variant="secondary" className={statusClassName}>
-            {status}
-          </Badge>
-        ) : (
-          <span className="text-zinc-500">-</span>
-        )}
+        <div className="flex flex-wrap gap-1.5">
+          {status ? (
+            <Badge variant="secondary" className={statusClassName}>
+              {status}
+            </Badge>
+          ) : (
+            <span className="text-zinc-500">-</span>
+          )}
+          <AgreementTagBadges tags={agreement.tags} />
+        </div>
         {agreement.correctionStatus ? (
           <div className="mt-1 text-xs text-zinc-500">{agreement.correctionStatus}</div>
         ) : null}
@@ -481,11 +522,14 @@ function ProfileAgreementsList({ agreements }) {
                     {agreement.personName || "Sem nome"}
                   </p>
                 </div>
-                {status ? (
-                  <Badge variant="secondary" className={statusClassName}>
-                    {status}
-                  </Badge>
-                ) : null}
+                <div className="flex flex-wrap justify-end gap-1.5">
+                  {status ? (
+                    <Badge variant="secondary" className={statusClassName}>
+                      {status}
+                    </Badge>
+                  ) : null}
+                  <AgreementTagBadges tags={agreement.tags} />
+                </div>
               </div>
 
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
@@ -545,6 +589,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
           agreements: new Set(),
           receivable: 0,
           received: 0,
+          recoverable: 0,
           overdue: 0,
         };
       const status = agreement.effectiveStatus || agreement.status;
@@ -552,6 +597,10 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
 
       current.total += 1;
       current.agreements.add(agreement.agreementId);
+
+      if (status !== "Cancelado") {
+        current.recoverable += value;
+      }
 
       if (status === "Recebido") {
         current.received += agreement.receivedValue || value;
@@ -569,7 +618,11 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
     });
 
     return [...byPerson.values()]
-      .map((row) => ({ ...row, agreementCount: row.agreements.size }))
+      .map((row) => ({
+        ...row,
+        agreementCount: row.agreements.size,
+        recoveryRate: getRecoveryRate(row.received, row.recoverable),
+      }))
       .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "pt-BR"));
   }, [agreements]);
   const normalizedSearch = normalizeText(search);
@@ -578,7 +631,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
       profileRows.filter((row) => !normalizedSearch || normalizeText(row.name).includes(normalizedSearch)),
     [normalizedSearch, profileRows]
   );
-  const PROFILE_ROW_HEIGHT = 84;
+  const PROFILE_ROW_HEIGHT = 104;
   const PROFILE_VIEWPORT_HEIGHT = 224;
   const PROFILE_OVERSCAN = 6;
   const profileStartIndex = Math.max(0, Math.floor(profileScrollTop / PROFILE_ROW_HEIGHT) - PROFILE_OVERSCAN);
@@ -609,11 +662,13 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
           completedCount: 0,
           canceledCount: 0,
           inProgressCount: 0,
+          tags: new Set(),
         };
       const status = agreement.effectiveStatus || agreement.status;
       const value = getInstallmentValue(agreement);
 
       current.total += 1;
+      (agreement.tags || []).forEach((tag) => current.tags.add(tag));
       if (status === "Cancelado") {
         current.canceledCount += 1;
       } else if (status === "Recebido" || status === "Finalizado") {
@@ -635,6 +690,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
     return [...byAgreement.values()]
       .map((agreement) => ({
         ...agreement,
+        tags: [...agreement.tags],
         status:
           agreement.inProgressCount > 0
             ? "Em andamento"
@@ -663,6 +719,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
       canceled: 0,
       receivable: 0,
       receivedValue: 0,
+      recoverableValue: 0,
     };
 
     activeAgreements.forEach((agreement) => {
@@ -672,6 +729,10 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
       summary.total += 1;
       if (agreement.agreementId) summary.agreementIds.add(agreement.agreementId);
       if (agreement.condominium) summary.condominiums.add(agreement.condominium);
+
+      if (status !== "Cancelado") {
+        summary.recoverableValue += value;
+      }
 
       if (status === "Recebido") {
         summary.received += 1;
@@ -691,6 +752,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
 
     return {
       ...summary,
+      recoveryRate: getRecoveryRate(summary.receivedValue, summary.recoverableValue),
       agreementCount: summary.agreementIds.size,
       condominiumCount: summary.condominiums.size,
       condominiumList: [...summary.condominiums].sort((a, b) => a.localeCompare(b, "pt-BR")),
@@ -771,7 +833,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
                   return (
                     <button
                       className={cn(
-                        "absolute left-0 right-0 grid min-h-[68px] min-w-0 gap-1 rounded-md border px-3 py-2 text-left transition",
+                        "absolute left-0 right-0 grid min-h-[88px] min-w-0 gap-1 rounded-md border px-3 py-2 text-left transition",
                         active
                           ? "border-white/30 bg-white/[0.1] text-white"
                           : "border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.07]"
@@ -787,6 +849,9 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
                       </span>
                       <span className="text-xs text-zinc-500">
                         {formatCurrency(profile.receivable)} a receber
+                      </span>
+                      <span className="text-xs text-zinc-500">
+                        Recuperação {formatPercentage(profile.recoveryRate)}
                       </span>
                     </button>
                   );
@@ -810,7 +875,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
 
       {activeProfile ? (
         <>
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7" aria-label="Resumo do perfil">
+          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo do perfil">
             <Metric label="Registros do perfil" value={profileSummary.total} />
             <Metric label="Acordos distintos" value={profileSummary.agreementCount} />
             <Metric label="Condominios" value={profileSummary.condominiumCount} />
@@ -818,6 +883,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
             <Metric label="Vencidos" value={profileSummary.overdue} />
             <Metric label="Valor recebido" value={formatCurrency(profileSummary.receivedValue)} />
             <Metric label="Valor a receber" value={formatCurrency(profileSummary.receivable)} />
+            <Metric label="Taxa recuperação" value={formatPercentage(profileSummary.recoveryRate)} />
           </section>
 
           <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(260px,360px)_minmax(0,1fr)]">
@@ -905,6 +971,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
                             <Badge variant="secondary" className={agreementStatusClassName}>
                               {agreement.status}
                             </Badge>
+                            <AgreementTagBadges tags={agreement.tags} />
                           </span>
                           <span className="mt-1 text-xs text-zinc-500">
                             {agreement.total} parcelas/registros
@@ -944,6 +1011,103 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
   );
 }
 
+function DueDatesView({ agreements }) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const dueLimitIso = addDaysIso(todayIso, 5);
+  const dueSoonAgreements = useMemo(
+    () =>
+      agreements
+        .filter((agreement) => {
+          const status = agreement.effectiveStatus || agreement.status;
+
+          return (
+            agreement.dueDate &&
+            agreement.dueDate >= todayIso &&
+            agreement.dueDate <= dueLimitIso &&
+            status !== "Recebido" &&
+            status !== "Finalizado" &&
+            status !== "Cancelado"
+          );
+        })
+        .sort((a, b) => {
+          const dateCompare = String(a.dueDate).localeCompare(String(b.dueDate));
+          if (dateCompare !== 0) return dateCompare;
+          return String(a.agreementId).localeCompare(String(b.agreementId), "pt-BR", { numeric: true });
+        }),
+    [agreements, dueLimitIso, todayIso]
+  );
+  const dueSummary = useMemo(
+    () =>
+      dueSoonAgreements.reduce(
+        (summary, agreement) => {
+          const daysToDue = daysBetween(todayIso, agreement.dueDate) ?? 0;
+
+          summary.value += getInstallmentValue(agreement);
+          summary.agreements.add(agreement.agreementId);
+          if (agreement.personName) summary.people.add(normalizeText(agreement.personName));
+          if (agreement.condominium) summary.condominiums.add(agreement.condominium);
+          if (daysToDue === 0) summary.today += 1;
+
+          return summary;
+        },
+        {
+          value: 0,
+          today: 0,
+          agreements: new Set(),
+          people: new Set(),
+          condominiums: new Set(),
+        }
+      ),
+    [dueSoonAgreements, todayIso]
+  );
+
+  return (
+    <section className="grid gap-4">
+      <div>
+        <h2 className="text-xl font-semibold tracking-normal text-white">Vencimentos</h2>
+        <p className="mt-1 text-sm text-zinc-400">
+          Parcelas em aberto com vencimento de {formatDate(todayIso)} até {formatDate(dueLimitIso)}.
+        </p>
+      </div>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Resumo de vencimentos">
+        <Metric label="Vencem até 5 dias" value={dueSoonAgreements.length} />
+        <Metric label="Vencem hoje" value={dueSummary.today} />
+        <Metric label="Valor próximo" value={formatCurrency(dueSummary.value)} />
+        <Metric label="Pessoas" value={dueSummary.people.size} />
+        <Metric label="Condomínios" value={dueSummary.condominiums.size} />
+      </section>
+
+      <Card className="min-w-0 overflow-hidden border-white/10 bg-white/[0.04] shadow-none">
+        <CardHeader className="flex flex-col gap-3 border-b border-white/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-base text-white">Parcelas próximas</CardTitle>
+            <CardDescription className="text-zinc-400">
+              {dueSoonAgreements.length} registros encontrados em {dueSummary.agreements.size} acordos.
+            </CardDescription>
+          </div>
+          <Badge variant="outline" className="w-fit gap-1.5 rounded-md border-white/15 text-zinc-200">
+            <CalendarDays size={14} aria-hidden="true" />
+            {formatCurrency(dueSummary.value)}
+          </Badge>
+        </CardHeader>
+        {dueSoonAgreements.length ? (
+          <AgreementsTable agreements={dueSoonAgreements} />
+        ) : (
+          <div className="grid min-h-[260px] place-items-center p-8 text-center">
+            <div>
+              <p className="font-medium text-white">Nenhum vencimento próximo</p>
+              <p className="mt-1 text-sm text-zinc-400">
+                Não há parcelas em aberto vencendo nos próximos 5 dias.
+              </p>
+            </div>
+          </div>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 function App() {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -961,6 +1125,7 @@ function App() {
     filtered: 0,
     condominiums: [],
     statuses: [],
+    teams: [],
     agreements: [],
   });
   const [allData, setAllData] = useState({
@@ -969,12 +1134,14 @@ function App() {
     filtered: 0,
     condominiums: [],
     statuses: [],
+    teams: [],
     agreements: [],
   });
   const [filters, setFilters] = useState({
     search: "",
     condominium: "",
     status: "",
+    team: "",
     dueFrom: "",
     dueTo: "",
   });
@@ -1115,6 +1282,8 @@ function App() {
           recoveredValue: 0,
           completionDaysSum: 0,
           completionDaysCount: 0,
+          recoveryDaysWeightedSum: 0,
+          recoveryValueWeight: 0,
           overdueDaysSum: 0,
           overdueDaysCount: 0,
           avgCompletionDays: 0,
@@ -1134,8 +1303,12 @@ function App() {
 
       const completionDays = daysBetween(agreement.agreementDate, agreement.receiptDate);
       if (completionDays !== null && (status === "Recebido" || status === "Finalizado")) {
+        const recoveryWeight = agreement.receivedValue || getInstallmentValue(agreement);
+
         current.completionDaysSum += completionDays;
         current.completionDaysCount += 1;
+        current.recoveryDaysWeightedSum += completionDays * recoveryWeight;
+        current.recoveryValueWeight += recoveryWeight;
       }
 
       if (isOverdueAgreement(agreement, todayIso)) {
@@ -1152,33 +1325,49 @@ function App() {
 
     const rows = [...byCondominium.values()].map((row) => ({
       ...row,
-      avgCompletionDays: row.completionDaysCount ? row.completionDaysSum / row.completionDaysCount : 0,
+      avgCompletionDays: row.recoveryValueWeight
+        ? row.recoveryDaysWeightedSum / row.recoveryValueWeight
+        : row.completionDaysCount
+          ? row.completionDaysSum / row.completionDaysCount
+          : 0,
       avgOverdueDays: row.overdueDaysCount ? row.overdueDaysSum / row.overdueDaysCount : 0,
+      cancelRate: row.total ? row.canceled / row.total : null,
     }));
     const totals = rows.reduce(
       (summary, row) => ({
+        total: summary.total + row.total,
+        canceled: summary.canceled + row.canceled,
         overdue: summary.overdue + row.overdue,
         receivable: summary.receivable + row.receivable,
         recoveredValue: summary.recoveredValue + row.recoveredValue,
         completionDaysSum: summary.completionDaysSum + row.completionDaysSum,
         completionDaysCount: summary.completionDaysCount + row.completionDaysCount,
+        recoveryDaysWeightedSum: summary.recoveryDaysWeightedSum + row.recoveryDaysWeightedSum,
+        recoveryValueWeight: summary.recoveryValueWeight + row.recoveryValueWeight,
         overdueDaysSum: summary.overdueDaysSum + row.overdueDaysSum,
         overdueDaysCount: summary.overdueDaysCount + row.overdueDaysCount,
       }),
       {
+        total: 0,
+        canceled: 0,
         overdue: 0,
         receivable: 0,
         recoveredValue: 0,
         completionDaysSum: 0,
         completionDaysCount: 0,
+        recoveryDaysWeightedSum: 0,
+        recoveryValueWeight: 0,
         overdueDaysSum: 0,
         overdueDaysCount: 0,
       }
     );
-    totals.avgCompletionDays = totals.completionDaysCount
+    totals.avgCompletionDays = totals.recoveryValueWeight
+      ? totals.recoveryDaysWeightedSum / totals.recoveryValueWeight
+      : totals.completionDaysCount
       ? totals.completionDaysSum / totals.completionDaysCount
       : 0;
     totals.avgOverdueDays = totals.overdueDaysCount ? totals.overdueDaysSum / totals.overdueDaysCount : 0;
+    totals.cancelRate = totals.total ? totals.canceled / totals.total : null;
 
     return {
       totals,
@@ -1186,6 +1375,10 @@ function App() {
       mostAgreements: [...rows].sort((a, b) => b.total - a.total).slice(0, 10),
       mostCompleted: [...rows].sort((a, b) => b.completed - a.completed).slice(0, 10),
       mostCanceled: [...rows].sort((a, b) => b.canceled - a.canceled).slice(0, 10),
+      highestCancelRate: [...rows]
+        .filter((row) => row.total)
+        .sort((a, b) => b.cancelRate - a.cancelRate || b.canceled - a.canceled)
+        .slice(0, 10),
       mostOverdue: [...rows].sort((a, b) => b.overdue - a.overdue).slice(0, 10),
       mostRecovered: [...rows].sort((a, b) => b.recoveredValue - a.recoveredValue).slice(0, 10),
       longestCompletion: [...rows]
@@ -1247,7 +1440,14 @@ function App() {
               <Building2 size={17} aria-hidden="true" />
               Condomínios
             </button>
-            <button className="flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium text-zinc-500 transition hover:bg-white/[0.05] hover:text-zinc-200">
+            <button
+              className={cn(
+                "flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium transition hover:bg-white/[0.05] hover:text-zinc-200",
+                activeView === "dueDates" ? "bg-white/[0.08] text-white" : "text-zinc-500"
+              )}
+              type="button"
+              onClick={() => setActiveView("dueDates")}
+            >
               <CalendarDays size={17} aria-hidden="true" />
               Vencimentos
             </button>
@@ -1313,14 +1513,16 @@ function App() {
                   className="w-full border-white/15 bg-transparent text-white hover:bg-white/10 sm:w-auto"
                   variant="outline"
                   type="button"
-                  onClick={() => setFilters({ search: "", condominium: "", status: "", dueFrom: "", dueTo: "" })}
+                  onClick={() =>
+                    setFilters({ search: "", condominium: "", status: "", team: "", dueFrom: "", dueTo: "" })
+                  }
                 >
                   <FilterX aria-hidden="true" />
                   Limpar
                 </Button>
               </CardHeader>
               <CardContent className="p-4">
-                <section className="grid items-end gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(240px,1.35fr)_minmax(190px,0.9fr)_minmax(150px,0.7fr)_minmax(155px,0.7fr)_minmax(155px,0.7fr)]">
+                <section className="grid items-end gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(240px,1.35fr)_minmax(190px,0.9fr)_minmax(150px,0.7fr)_minmax(105px,0.45fr)_minmax(155px,0.7fr)_minmax(155px,0.7fr)]">
                   <Field id="search" label="Busca" icon={<Search size={17} aria-hidden="true" />}>
                     <input
                       id="search"
@@ -1345,6 +1547,14 @@ function App() {
                     options={data.statuses}
                     value={filters.status}
                     onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
+                  />
+
+                  <DropdownFilter
+                    id="team"
+                    label="Equipe"
+                    options={data.teams}
+                    value={filters.team}
+                    onChange={(value) => setFilters((current) => ({ ...current, team: value }))}
                   />
 
                   <Field id="dueFrom" label="Vencimento de" icon={<CalendarDays size={17} aria-hidden="true" />}>
@@ -1408,7 +1618,7 @@ function App() {
                 selectedProfile={selectedProfile}
                 onSelectProfile={setSelectedProfile}
               />
-            ) : (
+            ) : activeView === "condominiums" ? (
               <section className="grid gap-4">
                 <div>
                   <h2 className="text-xl font-semibold tracking-normal text-white">Condomínios</h2>
@@ -1417,7 +1627,7 @@ function App() {
                   </p>
                 </div>
 
-                <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7" aria-label="Resumo de condomínios">
+                <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo de condomínios">
                   <Metric label="Condomínios no filtro" value={condominiumRankings.totalCondominiums} />
                   <Metric label="Acordos vencidos" value={condominiumRankings.totals.overdue} />
                   <Metric
@@ -1429,8 +1639,12 @@ function App() {
                     value={formatCurrency(condominiumRankings.totals.recoveredValue)}
                   />
                   <Metric
-                    label="Média conclusão"
+                    label="Tempo recuperação"
                     value={formatDays(condominiumRankings.totals.avgCompletionDays)}
+                  />
+                  <Metric
+                    label="% cancelados"
+                    value={formatPercentage(condominiumRankings.totals.cancelRate)}
                   />
                   <Metric
                     label="Média inadimplência"
@@ -1459,6 +1673,13 @@ function App() {
                     valueKey="canceled"
                   />
                   <RankingCard
+                    title="Maior % de cancelados"
+                    description="Cancelados sobre o total de parcelas/acordos do condomínio."
+                    rows={condominiumRankings.highestCancelRate}
+                    valueKey="cancelRate"
+                    valueFormatter={formatPercentage}
+                  />
+                  <RankingCard
                     title="Mais acordos inadimplentes"
                     description="Vencimento anterior a hoje, sem recebimento e não cancelado."
                     rows={condominiumRankings.mostOverdue}
@@ -1472,8 +1693,8 @@ function App() {
                     valueFormatter={formatCurrency}
                   />
                   <RankingCard
-                    title="Maior média de conclusão"
-                    description="Dias entre data do acordo e recebimento."
+                    title="Maior tempo de recuperação"
+                    description="Dias entre data do acordo e recebimento, ponderado pelo valor recebido."
                     rows={condominiumRankings.longestCompletion}
                     valueKey="avgCompletionDays"
                     valueFormatter={formatDays}
@@ -1487,6 +1708,8 @@ function App() {
                   />
                 </section>
               </section>
+            ) : (
+              <DueDatesView agreements={allData.agreements} />
             )}
           </div>
         </section>
