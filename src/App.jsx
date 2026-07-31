@@ -78,7 +78,9 @@ async function readApiResponse(response, fallbackMessage) {
   const result = contentType.includes("application/json") ? await response.json() : { detail: await response.text() };
 
   if (!response.ok) {
-    throw new Error(result.error || result.detail || fallbackMessage);
+    const message = result.error || fallbackMessage;
+    const detail = result.detail && result.detail !== message ? ` ${result.detail}` : "";
+    throw new Error(`${message}.${detail}`.trim());
   }
 
   return result;
