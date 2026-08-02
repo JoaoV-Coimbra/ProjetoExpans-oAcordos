@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import "./main.css";
 
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:3001" : "");
+const AGREEMENT_STATUS_OPTIONS = ["Concluído", "Vencido", "Em aberto", "Cancelado"];
 
 const currencyFormatter = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -66,6 +67,107 @@ function getInstallmentValue(agreement) {
 
 function getRecoveryRate(receivedValue, recoverableValue) {
   return recoverableValue > 0 ? receivedValue / recoverableValue : null;
+}
+
+function getDisplayStatus(agreement) {
+  const status = agreement.effectiveStatus || agreement.status || "";
+  if (status === "Recebido" || status === "Finalizado" || status === "Concluído") return "Concluído";
+  if (status === "Cancelado") return "Cancelado";
+  if (status === "Vencido") return "Vencido";
+  return "Em aberto";
+}
+
+function getAgreementStatus(installments) {
+  if (!installments.length) return "Em aberto";
+
+  const statuses = installments.map(getDisplayStatus);
+  if (statuses.every((status) => status === "Cancelado")) return "Cancelado";
+  if (statuses.some((status) => status === "Vencido")) return "Vencido";
+  if (statuses.some((status) => status === "Em aberto")) return "Em aberto";
+  return "Concluído";
+}
+
+function sortIsoDates(values, direction = "asc") {
+  return values
+    .filter(Boolean)
+    .sort((a, b) => (direction === "asc" ? String(a).localeCompare(String(b)) : String(b).localeCompare(String(a))));
+}
+
+function aggregateAgreementRows(agreements) {
+  const byAgreement = new Map();
+
+  agreements.forEach((agreement) => {
+    const key = agreement.agreementId || agreement.id;
+    const current =
+      byAgreement.get(key) || {
+        ...agreement,
+        id: `agreement-${key}`,
+        parcelIds: [],
+        installments: [],
+        tags: new Set(),
+        installmentCount: 0,
+        value: 0,
+        updatedValue: 0,
+        receivedValue: 0,
+        agreementDate: "",
+        dueDate: "",
+        receiptDate: "",
+        correctionStatuses: new Set(),
+        isAgreementRow: true,
+      };
+
+    current.parcelIds.push(agreement.parcelId);
+    current.installments.push(agreement);
+    (agreement.tags || []).forEach((tag) => current.tags.add(tag));
+    if (agreement.correctionStatus) current.correctionStatuses.add(agreement.correctionStatus);
+    current.value += agreement.value || 0;
+    current.updatedValue += getInstallmentValue(agreement);
+    current.receivedValue += agreement.receivedValue || 0;
+    current.installmentCount = Math.max(current.installmentCount || 0, agreement.installmentCount || 0);
+
+    if (!current.agreementDate || (agreement.agreementDate && agreement.agreementDate < current.agreementDate)) {
+      current.agreementDate = agreement.agreementDate;
+    }
+
+    byAgreement.set(key, current);
+  });
+
+  return [...byAgreement.values()].map((agreement) => {
+    const status = getAgreementStatus(agreement.installments);
+    const openInstallments = agreement.installments.filter((item) => {
+      const itemStatus = getDisplayStatus(item);
+      return itemStatus === "Em aberto" || itemStatus === "Vencido";
+    });
+    const dueDates = sortIsoDates(openInstallments.map((item) => item.dueDate));
+    const receiptDates = sortIsoDates(
+      agreement.installments
+        .filter((item) => getDisplayStatus(item) === "Concluído")
+        .map((item) => item.receiptDate),
+      "desc"
+    );
+    const firstInstallment = agreement.installments[0];
+
+    return {
+      ...agreement,
+      status,
+      effectiveStatus: status,
+      originalStatus: status,
+      installment: agreement.installments.length,
+      installmentCount: agreement.installmentCount || agreement.installments.length,
+      parcelId: "",
+      dueDate: dueDates[0] || "",
+      receiptDate: status === "Concluído" ? receiptDates[0] || "" : "",
+      tags: [...agreement.tags],
+      correctionStatus: [...agreement.correctionStatuses].join(", "),
+      personName: firstInstallment.personName,
+      condominium: firstInstallment.condominium,
+      administrator: firstInstallment.administrator,
+      unit: firstInstallment.unit,
+      admUnit: firstInstallment.admUnit,
+      agreementUpdatedValue: agreement.updatedValue,
+      totalAgreementValue: agreement.updatedValue,
+    };
+  });
 }
 
 async function readApiResponse(response, fallbackMessage) {
@@ -132,10 +234,10 @@ function addDaysIso(dateIso, amount) {
 
 function Metric({ label, value }) {
   return (
-    <Card className="min-h-[104px] border-white/10 bg-white/[0.04] shadow-none">
+    <Card className="min-h-[104px] min-w-0 border-white/10 bg-white/[0.04] shadow-none">
       <CardContent className="p-4">
         <p className="text-xs font-medium text-zinc-400">{label}</p>
-        <p className="mt-4 whitespace-nowrap text-[clamp(1rem,1.05vw,1.5rem)] font-semibold tracking-normal text-white">
+        <p className="mt-4 break-words text-lg font-semibold leading-tight tracking-normal text-white sm:text-xl xl:text-[1.35rem]">
           {value}
         </p>
       </CardContent>
@@ -145,11 +247,11 @@ function Metric({ label, value }) {
 
 function Field({ id, label, icon, children }) {
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <Label htmlFor={id} className="text-xs font-medium text-zinc-400">
         {label}
       </Label>
-      <div className="flex h-10 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-zinc-400 focus-within:ring-2 focus-within:ring-white/45">
+      <div className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-zinc-400 focus-within:ring-2 focus-within:ring-white/45">
         {icon}
         {children}
       </div>
@@ -289,21 +391,55 @@ function AgreementTagBadges({ tags }) {
   ));
 }
 
-const AgreementRow = React.memo(function AgreementRow({ agreement }) {
-  const status = agreement.effectiveStatus || agreement.status;
+function getInstallmentLabel(agreement) {
+  if (!agreement.isAgreementRow) return agreement.installment || "-";
+
+  const firstInstallment = agreement.installments[0];
+  const number = firstInstallment?.installment || "";
+  const total = firstInstallment?.installmentCount || agreement.installmentCount || "";
+
+  if (!number && !total) return "-";
+  return total ? `${number || "-"}/${total}` : String(number);
+}
+
+const AgreementRow = React.memo(function AgreementRow({ agreement, selected, onSelect }) {
+  const status = getDisplayStatus(agreement);
   const statusClassName =
     status === "Vencido"
       ? "bg-red-500/15 text-red-200"
       : status === "Cancelado"
         ? "bg-zinc-500/15 text-zinc-300"
-        : "bg-white/10 text-zinc-200";
+        : status === "Concluído"
+          ? "bg-emerald-500/15 text-emerald-100"
+          : "bg-yellow-500/15 text-yellow-100";
+  const installmentLabel = getInstallmentLabel(agreement);
 
   return (
-    <TableRow className="border-white/10 hover:bg-white/[0.06]">
+    <TableRow
+      className={cn(
+        "cursor-pointer border-white/10 outline-none hover:bg-white/[0.06] focus-visible:bg-white/[0.08]",
+        selected ? "bg-white/[0.08]" : ""
+      )}
+      tabIndex={0}
+      role="button"
+      aria-pressed={selected}
+      onClick={() => onSelect(agreement)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect(agreement);
+        }
+      }}
+    >
       <TableCell className="font-medium text-white">{agreement.agreementId}</TableCell>
       <TableCell className="text-zinc-300">
-        {agreement.installment || "-"}
-        {agreement.installmentCount ? <span className="text-zinc-500">/{agreement.installmentCount}</span> : null}
+        {installmentLabel}
+        {agreement.isAgreementRow && agreement.parcelIds[0] ? (
+          <div className="mt-1 text-xs text-zinc-500">ID {agreement.parcelIds[0]}</div>
+        ) : null}
+        {!agreement.isAgreementRow && agreement.installmentCount ? (
+          <span className="text-zinc-500">/{agreement.installmentCount}</span>
+        ) : null}
         {agreement.parcelId ? <div className="mt-1 text-xs text-zinc-500">ID {agreement.parcelId}</div> : null}
       </TableCell>
       <TableCell className="text-zinc-300">
@@ -342,6 +478,70 @@ const AgreementRow = React.memo(function AgreementRow({ agreement }) {
   );
 });
 
+function getInstallmentSortNumber(agreement) {
+  const parsed = Number(String(agreement.installment || "").replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+}
+
+function AgreementInstallmentsPanel({ agreement, onClose }) {
+  if (!agreement?.installments?.length) return null;
+
+  const installments = [...agreement.installments].sort(
+    (a, b) =>
+      getInstallmentSortNumber(a) - getInstallmentSortNumber(b) ||
+      String(a.dueDate || "").localeCompare(String(b.dueDate || "")) ||
+      String(a.parcelId || "").localeCompare(String(b.parcelId || ""), "pt-BR", { numeric: true })
+  );
+
+  return (
+    <TableRow className="border-white/10 bg-[#0b0b0b] hover:bg-[#0b0b0b]">
+      <TableCell className="p-0" colSpan={10}>
+        <div className="border-y border-white/10 px-4 py-3">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <p className="min-w-0 truncate text-xs font-semibold uppercase text-zinc-400">
+              Parcelas do acordo {agreement.agreementId}
+            </p>
+            <button
+              className="grid size-7 shrink-0 place-items-center rounded-md text-zinc-400 transition hover:bg-white/10 hover:text-white"
+              type="button"
+              title="Fechar"
+              onClick={onClose}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="grid max-h-52 gap-1.5 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            {installments.map((installment) => {
+              const status = getDisplayStatus(installment);
+              const label = `${installment.installment || "-"}/${installment.installmentCount || agreement.installmentCount || "-"}`;
+
+              return (
+                <div
+                  className="grid min-w-0 grid-cols-[minmax(80px,0.8fr)_minmax(96px,1fr)_auto] items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-3 py-2 text-xs"
+                  key={installment.id}
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-white">{label}</p>
+                    {installment.parcelId ? <p className="mt-0.5 truncate text-zinc-500">ID {installment.parcelId}</p> : null}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-zinc-200">{formatCurrency(getInstallmentValue(installment))}</p>
+                    <p className="mt-0.5 truncate text-zinc-500">Venc. {formatDate(installment.dueDate)}</p>
+                  </div>
+                  <Badge variant="secondary" className="shrink-0 bg-white/10 text-zinc-200">
+                    {status}
+                  </Badge>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
 function getSortValue(agreement, key) {
   if (key === "status") return agreement.effectiveStatus || agreement.status || "";
   if (key === "value") return getInstallmentValue(agreement);
@@ -358,7 +558,7 @@ function SortableHead({ label, sortKey, activeSort, onSort }) {
   const Icon = active ? (activeSort.direction === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
 
   return (
-    <TableHead className="text-zinc-400">
+    <TableHead className="px-2 text-zinc-400 sm:px-3">
       <button
         className={cn(
           "flex h-8 w-full items-center justify-between gap-2 rounded-sm text-left transition hover:text-white",
@@ -382,6 +582,7 @@ const AgreementsTable = React.memo(function AgreementsTable({ agreements }) {
   const frameRef = useRef(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [sort, setSort] = useState({ key: "", direction: "" });
+  const [selectedAgreementId, setSelectedAgreementId] = useState("");
   const sortedAgreements = useMemo(() => {
     if (!sort.key) return agreements;
 
@@ -404,7 +605,6 @@ const AgreementsTable = React.memo(function AgreementsTable({ agreements }) {
   const visibleAgreements = sortedAgreements.slice(startIndex, endIndex);
   const topSpacer = startIndex * ROW_HEIGHT;
   const bottomSpacer = Math.max(0, (sortedAgreements.length - endIndex) * ROW_HEIGHT);
-
   function updateSort(key) {
     setSort((current) => {
       if (current.key !== key) {
@@ -424,57 +624,73 @@ const AgreementsTable = React.memo(function AgreementsTable({ agreements }) {
     }
   }
 
+  function handleSelectAgreement(agreement) {
+    if (!agreement.installments?.length) return;
+    setSelectedAgreementId((current) => (current === agreement.id ? "" : agreement.id));
+  }
+
   return (
-    <div
-      ref={scrollContainerRef}
-      className="max-h-[640px] overflow-auto"
-      onScroll={(event) => {
-        const nextScrollTop = event.currentTarget.scrollTop;
-        if (frameRef.current) return;
-        frameRef.current = window.requestAnimationFrame(() => {
-          setScrollTop(nextScrollTop);
-          frameRef.current = null;
-        });
-      }}
-    >
-      <Table className="min-w-[1290px]">
-        <TableHeader className="sticky top-0 z-10 bg-[#141414]">
-          <TableRow className="border-white/10 bg-white/[0.06] hover:bg-white/[0.06]">
-            <SortableHead label="Acordo" sortKey="agreementId" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Parcela" sortKey="installment" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Unidade" sortKey="unit" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Proprietário" sortKey="personName" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Condomínio" sortKey="condominium" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Firmação" sortKey="agreementDate" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Vencimento" sortKey="dueDate" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Recebimento" sortKey="receiptDate" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Valor" sortKey="value" activeSort={sort} onSort={updateSort} />
-            <SortableHead label="Status" sortKey="status" activeSort={sort} onSort={updateSort} />
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {topSpacer ? (
-            <TableRow>
-              <TableCell className="p-0" colSpan={10} style={{ height: topSpacer }} />
+    <>
+      <div
+        ref={scrollContainerRef}
+        className="max-h-[calc(100vh-15rem)] overflow-auto overscroll-contain md:max-h-[640px]"
+        onScroll={(event) => {
+          const nextScrollTop = event.currentTarget.scrollTop;
+          if (frameRef.current) return;
+          frameRef.current = window.requestAnimationFrame(() => {
+            setScrollTop(nextScrollTop);
+            frameRef.current = null;
+          });
+        }}
+      >
+        <Table className="min-w-[940px] xl:min-w-[1180px]">
+          <TableHeader className="sticky top-0 z-10 bg-[#141414]">
+            <TableRow className="border-white/10 bg-white/[0.06] hover:bg-white/[0.06]">
+              <SortableHead label="Acordo" sortKey="agreementId" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Parcelas" sortKey="installment" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Unidade" sortKey="unit" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Proprietário" sortKey="personName" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Condomínio" sortKey="condominium" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Firmação" sortKey="agreementDate" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Vencimento" sortKey="dueDate" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Recebimento" sortKey="receiptDate" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Valor" sortKey="value" activeSort={sort} onSort={updateSort} />
+              <SortableHead label="Status" sortKey="status" activeSort={sort} onSort={updateSort} />
             </TableRow>
-          ) : null}
-          {visibleAgreements.map((agreement) => (
-            <AgreementRow agreement={agreement} key={agreement.id} />
-          ))}
-          {bottomSpacer ? (
-            <TableRow>
-              <TableCell className="p-0" colSpan={10} style={{ height: bottomSpacer }} />
-            </TableRow>
-          ) : null}
-        </TableBody>
-      </Table>
-    </div>
+          </TableHeader>
+          <TableBody>
+            {topSpacer ? (
+              <TableRow>
+                <TableCell className="p-0" colSpan={10} style={{ height: topSpacer }} />
+              </TableRow>
+            ) : null}
+            {visibleAgreements.map((agreement) => (
+              <React.Fragment key={agreement.id}>
+                <AgreementRow
+                  agreement={agreement}
+                  selected={selectedAgreementId === agreement.id}
+                  onSelect={handleSelectAgreement}
+                />
+                {selectedAgreementId === agreement.id ? (
+                  <AgreementInstallmentsPanel agreement={agreement} onClose={() => setSelectedAgreementId("")} />
+                ) : null}
+              </React.Fragment>
+            ))}
+            {bottomSpacer ? (
+              <TableRow>
+                <TableCell className="p-0" colSpan={10} style={{ height: bottomSpacer }} />
+              </TableRow>
+            ) : null}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 });
 
 function RankingCard({ title, description, rows, valueKey = "total", valueFormatter = (value) => value }) {
   return (
-    <Card className="border-white/10 bg-white/[0.04] shadow-none">
+    <Card className="min-w-0 border-white/10 bg-white/[0.04] shadow-none">
       <CardHeader className="border-b border-white/10 px-4 py-3">
         <CardTitle className="text-base text-white">{title}</CardTitle>
         <CardDescription className="text-zinc-400">{description}</CardDescription>
@@ -483,7 +699,10 @@ function RankingCard({ title, description, rows, valueKey = "total", valueFormat
         {rows.length ? (
           <div className="divide-y divide-white/10">
             {rows.map((row, index) => (
-              <div className="grid grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3" key={row.condominium}>
+              <div
+                className="grid grid-cols-[28px_minmax(0,1fr)] items-center gap-3 px-4 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto]"
+                key={row.condominium}
+              >
                 <div className="grid size-7 place-items-center rounded-md bg-white/10 text-xs font-semibold text-zinc-300">
                   {index + 1}
                 </div>
@@ -493,7 +712,9 @@ function RankingCard({ title, description, rows, valueKey = "total", valueFormat
                     {row.total} acordos, {row.received + row.finalized} concluídos
                   </p>
                 </div>
-                <div className="text-right text-sm font-semibold text-white">{valueFormatter(row[valueKey])}</div>
+                <div className="col-start-2 break-words text-sm font-semibold text-white sm:col-start-auto sm:text-right">
+                  {valueFormatter(row[valueKey])}
+                </div>
               </div>
             ))}
           </div>
@@ -516,7 +737,7 @@ function ProfileAgreementField({ label, children }) {
 
 function ProfileAgreementsList({ agreements }) {
   return (
-    <CardContent className="max-h-[640px] overflow-y-auto p-0">
+    <CardContent className="max-h-[calc(100vh-15rem)] overflow-y-auto p-0 md:max-h-[640px]">
       <div className="divide-y divide-white/10">
         {agreements.map((agreement) => {
           const status = agreement.effectiveStatus || agreement.status;
@@ -800,14 +1021,14 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
         </p>
       </div>
 
-      <Card className="border-white/10 bg-white/[0.04] shadow-none">
+      <Card className="min-w-0 border-white/10 bg-white/[0.04] shadow-none">
         <CardHeader className="border-b border-white/10 px-4 py-3">
           <CardTitle className="text-base text-white">Buscar pessoa</CardTitle>
           <CardDescription className="text-zinc-400">
             Digite parte do nome e selecione um perfil encontrado.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 p-4 xl:grid-cols-[minmax(260px,420px)_1fr]">
+        <CardContent className="grid min-w-0 gap-4 p-4 xl:grid-cols-[minmax(240px,380px)_minmax(0,1fr)]">
           <Field id="profileSearch" label="Nome" icon={<Search size={17} aria-hidden="true" />}>
             <input
               id="profileSearch"
@@ -889,7 +1110,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
 
       {activeProfile ? (
         <>
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo do perfil">
+          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo do perfil">
             <Metric label="Registros do perfil" value={profileSummary.total} />
             <Metric label="Acordos distintos" value={profileSummary.agreementCount} />
             <Metric label="Condominios" value={profileSummary.condominiumCount} />
@@ -900,7 +1121,7 @@ function ProfilesView({ agreements, search, onSearchChange, selectedProfile, onS
             <Metric label="Taxa recuperação" value={formatPercentage(profileSummary.recoveryRate)} />
           </section>
 
-          <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(260px,360px)_minmax(0,1fr)]">
+          <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(240px,340px)_minmax(0,1fr)]">
             <Card className="border-white/10 bg-white/[0.04] shadow-none">
               <CardHeader className="border-b border-white/10 px-4 py-3">
                 <CardTitle className="truncate text-base text-white">{activeProfile}</CardTitle>
@@ -1084,7 +1305,7 @@ function DueDatesView({ agreements }) {
         </p>
       </div>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="Resumo de vencimentos">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5" aria-label="Resumo de vencimentos">
         <Metric label="Vencem até 5 dias" value={dueSoonAgreements.length} />
         <Metric label="Vencem hoje" value={dueSummary.today} />
         <Metric label="Valor próximo" value={formatCurrency(dueSummary.value)} />
@@ -1119,6 +1340,37 @@ function DueDatesView({ agreements }) {
         )}
       </Card>
     </section>
+  );
+}
+
+const NAV_ITEMS = [
+  { id: "overview", label: "Visao geral", Icon: WalletCards },
+  { id: "profiles", label: "Perfis", Icon: UserRound },
+  { id: "condominiums", label: "Condominios", Icon: Building2 },
+  { id: "dueDates", label: "Vencimentos", Icon: CalendarDays },
+];
+
+function ViewNav({ activeView, onChange, variant = "sidebar" }) {
+  const isMobile = variant === "mobile";
+
+  return (
+    <nav className={isMobile ? "flex gap-2 overflow-x-auto px-3 pb-3 sm:px-6 lg:hidden" : "grid gap-1 p-3"}>
+      {NAV_ITEMS.map(({ id, label, Icon }) => (
+        <button
+          className={cn(
+            "flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium transition hover:bg-white/[0.05] hover:text-zinc-200",
+            isMobile ? "shrink-0 justify-center border border-white/10 bg-white/[0.03]" : "w-full",
+            activeView === id ? "bg-white/[0.08] text-white" : "text-zinc-500"
+          )}
+          type="button"
+          key={id}
+          onClick={() => onChange(id)}
+        >
+          <Icon size={17} aria-hidden="true" />
+          <span className="whitespace-nowrap">{label}</span>
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -1163,6 +1415,7 @@ function App() {
   const query = useMemo(() => {
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([key, value]) => {
+      if (key === "status") return;
       if (value) params.set(key, value);
     });
     return params.toString();
@@ -1255,17 +1508,32 @@ function App() {
     }
   }
 
+  const agreementRows = useMemo(() => aggregateAgreementRows(data.agreements), [data.agreements]);
+  const allAgreementRows = useMemo(
+    () => aggregateAgreementRows(allData.agreements.length ? allData.agreements : data.agreements),
+    [allData.agreements, data.agreements]
+  );
+  const viewAgreements = useMemo(
+    () =>
+      agreementRows.filter(
+        (agreement) => !filters.status || normalizeText(getDisplayStatus(agreement)) === normalizeText(filters.status)
+      ),
+    [agreementRows, filters.status]
+  );
+  const viewTotal = allAgreementRows.length;
+  const viewFiltered = viewAgreements.length;
+
   const financialSummary = useMemo(
     () =>
-      data.agreements.reduce(
+      viewAgreements.reduce(
         (summary, agreement) => {
           const value = getInstallmentValue(agreement);
           const receivedValue = agreement.receivedValue || 0;
-          const status = agreement.effectiveStatus || agreement.status;
+          const status = getDisplayStatus(agreement);
 
           summary.filtered += value;
 
-          if (status === "Recebido") {
+          if (status === "Concluído") {
             summary.received += receivedValue || value;
           }
 
@@ -1281,14 +1549,14 @@ function App() {
         },
         { filtered: 0, received: 0, canceled: 0, receivable: 0 }
       ),
-    [data.agreements]
+    [viewAgreements]
   );
   const latestImport = data.updatedAt ? new Date(data.updatedAt).toLocaleString("pt-BR") : "-";
   const todayIso = new Date().toISOString().slice(0, 10);
   const condominiumRankings = useMemo(() => {
     const byCondominium = new Map();
 
-    data.agreements.forEach((agreement) => {
+    viewAgreements.forEach((agreement) => {
       const key = agreement.condominium || "Sem condomínio";
       const current =
         byCondominium.get(key) || {
@@ -1312,18 +1580,17 @@ function App() {
         };
 
       current.total += 1;
-      const status = agreement.effectiveStatus || agreement.status;
+      const status = getDisplayStatus(agreement);
 
-      if (status === "Recebido") {
+      if (status === "Concluído") {
         current.received += 1;
         current.recoveredValue += agreement.receivedValue || getInstallmentValue(agreement);
       }
-      if (status === "Finalizado") current.finalized += 1;
       if (status === "Cancelado") current.canceled += 1;
       current.completed = current.received + current.finalized;
 
       const completionDays = daysBetween(agreement.agreementDate, agreement.receiptDate);
-      if (completionDays !== null && (status === "Recebido" || status === "Finalizado")) {
+      if (completionDays !== null && status === "Concluído") {
         const recoveryWeight = agreement.receivedValue || getInstallmentValue(agreement);
 
         current.completionDaysSum += completionDays;
@@ -1411,10 +1678,10 @@ function App() {
         .sort((a, b) => b.avgOverdueDays - a.avgOverdueDays)
         .slice(0, 10),
     };
-  }, [data.agreements, todayIso]);
+  }, [viewAgreements, todayIso]);
 
   return (
-    <main className="min-h-screen bg-[#050505] text-white">
+    <main className="min-h-screen overflow-x-hidden bg-[#050505] text-white">
       <div className="grid min-h-screen lg:grid-cols-[260px_1fr]">
         <aside className="hidden border-r border-white/10 bg-[#080808] lg:block">
           <div className="flex h-16 items-center gap-3 border-b border-white/10 px-5">
@@ -1477,19 +1744,22 @@ function App() {
 
         <section className="min-w-0">
           <header className="sticky top-0 z-10 border-b border-white/10 bg-[#050505]/95 backdrop-blur">
-            <div className="flex min-h-16 flex-col gap-3 px-4 py-3 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <h1 className="text-xl font-semibold tracking-normal text-white">
+            <div className="flex min-h-16 flex-col gap-3 px-3 py-3 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+              <div className="min-w-0">
+                <h1 className="text-lg font-semibold tracking-normal text-white sm:text-xl">
                   Carteira de Acordos
                 </h1>
                 <p className="mt-1 text-sm text-zinc-400">
-                  {data.total} acordos cadastrados, {data.filtered} no filtro atual.
+                  {viewTotal} acordos cadastrados, {viewFiltered} no filtro atual.
                 </p>
               </div>
 
               {import.meta.env.DEV ? (
-                <form className="grid gap-2 sm:grid-cols-[auto_minmax(180px,280px)_auto]" onSubmit={handleImport}>
-                  <label className={cn(buttonVariants({ variant: "outline" }), "relative cursor-pointer overflow-hidden border-white/15 bg-transparent text-white hover:bg-white/10")}>
+                <form
+                  className="grid w-full min-w-0 gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] lg:w-auto lg:max-w-[560px]"
+                  onSubmit={handleImport}
+                >
+                  <label className={cn(buttonVariants({ variant: "outline" }), "relative w-full cursor-pointer overflow-hidden border-white/15 bg-transparent text-white hover:bg-white/10 sm:w-auto")}>
                     <FileSpreadsheet aria-hidden="true" />
                     Planilha
                     <input
@@ -1499,29 +1769,30 @@ function App() {
                       onChange={(event) => setFile(event.target.files?.[0] || null)}
                     />
                   </label>
-                  <div className="flex h-10 items-center rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-400">
+                  <div className="flex h-10 min-w-0 items-center rounded-md border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-400">
                     <span className="truncate">{file?.name || "Nenhum arquivo selecionado"}</span>
                   </div>
-                  <Button disabled={!file || loading} type="submit">
+                  <Button className="w-full sm:w-auto" disabled={!file || loading} type="submit">
                     <UploadCloud aria-hidden="true" />
                     {loading ? "Importando" : "Importar"}
                   </Button>
                 </form>
               ) : (
-                <Button disabled={loading} type="button" onClick={handleImport}>
+                <Button className="w-full sm:w-auto" disabled={loading} type="button" onClick={handleImport}>
                   <RefreshCw aria-hidden="true" className={loading ? "animate-spin" : ""} />
                   {loading ? "Atualizando" : "Atualizar base"}
                 </Button>
               )}
             </div>
+            <ViewNav activeView={activeView} onChange={setActiveView} variant="mobile" />
           </header>
 
-          <div className="px-4 py-5 sm:px-6">
+          <div className="px-3 pb-24 pt-4 sm:px-6 sm:pb-24 sm:pt-5 lg:pb-5">
             {activeView === "overview" ? (
               <>
-            <section className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-[repeat(2,minmax(170px,0.7fr))_repeat(4,minmax(240px,1fr))_minmax(220px,0.9fr)]" aria-label="Resumo da carteira">
-              <Metric label="Acordos na base" value={data.total} />
-              <Metric label="Resultado filtrado" value={data.filtered} />
+            <section className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7" aria-label="Resumo da carteira">
+              <Metric label="Acordos na base" value={viewTotal} />
+              <Metric label="Resultado filtrado" value={viewFiltered} />
               <Metric label="Valor filtrado" value={formatCurrency(financialSummary.filtered)} />
               <Metric label="Valor recebido" value={formatCurrency(financialSummary.received)} />
               <Metric label="Valor acordos cancelados" value={formatCurrency(financialSummary.canceled)} />
@@ -1550,7 +1821,7 @@ function App() {
                 </Button>
               </CardHeader>
               <CardContent className="p-4">
-                <section className="grid items-end gap-3 md:grid-cols-2 2xl:grid-cols-[minmax(240px,1.35fr)_minmax(190px,0.9fr)_minmax(150px,0.7fr)_minmax(105px,0.45fr)_minmax(155px,0.7fr)_minmax(155px,0.7fr)]">
+                <section className="grid items-end gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-[minmax(240px,1.35fr)_minmax(190px,0.9fr)_minmax(150px,0.7fr)_minmax(105px,0.45fr)_minmax(155px,0.7fr)_minmax(155px,0.7fr)]">
                   <Field id="search" label="Busca" icon={<Search size={17} aria-hidden="true" />}>
                     <input
                       id="search"
@@ -1572,14 +1843,14 @@ function App() {
                   <DropdownFilter
                     id="status"
                     label="Status"
-                    options={data.statuses}
+                    options={AGREEMENT_STATUS_OPTIONS}
                     value={filters.status}
                     onChange={(value) => setFilters((current) => ({ ...current, status: value }))}
                   />
 
                   <DropdownFilter
                     id="team"
-                    label="Equipe"
+                    label="Empresa"
                     options={data.teams}
                     value={filters.team}
                     onChange={(value) => setFilters((current) => ({ ...current, team: value }))}
@@ -1616,7 +1887,7 @@ function App() {
                 <div>
                   <CardTitle className="text-base text-white">Acordos</CardTitle>
                   <CardDescription className="text-zinc-400">
-                    {data.filtered} registros encontrados
+                    {viewFiltered} acordos encontrados
                   </CardDescription>
                 </div>
                 <Badge variant="outline" className="w-fit gap-1.5 rounded-md border-white/15 text-zinc-200">
@@ -1624,8 +1895,8 @@ function App() {
                   {formatCurrency(financialSummary.filtered)}
                 </Badge>
               </CardHeader>
-              {data.agreements.length ? (
-                <AgreementsTable agreements={data.agreements} />
+              {viewAgreements.length ? (
+                <AgreementsTable agreements={viewAgreements} />
               ) : (
                 <div className="grid min-h-[280px] place-items-center p-8 text-center">
                   <div>
@@ -1655,7 +1926,7 @@ function App() {
                   </p>
                 </div>
 
-                <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo de condomínios">
+                <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8" aria-label="Resumo de condomínios">
                   <Metric label="Condomínios no filtro" value={condominiumRankings.totalCondominiums} />
                   <Metric label="Acordos vencidos" value={condominiumRankings.totals.overdue} />
                   <Metric
@@ -1678,31 +1949,31 @@ function App() {
                     label="Média inadimplência"
                     value={formatDays(condominiumRankings.totals.avgOverdueDays)}
                   />
-                  <Metric label="Base filtrada" value={data.filtered} />
+                  <Metric label="Base filtrada" value={viewFiltered} />
                 </section>
 
                 <section className="grid gap-4 xl:grid-cols-2">
                   <RankingCard
                     title="Ranking de condomínios com mais acordos"
-                    description="Top 10 por quantidade de parcelas/acordos no filtro atual."
+                    description="Top 10 por quantidade de acordos no filtro atual."
                     rows={condominiumRankings.mostAgreements}
                     valueKey="total"
                   />
                   <RankingCard
                     title="Mais acordos concluídos"
-                    description="Considera parcelas recebidas ou finalizadas."
+                    description="Considera acordos concluídos."
                     rows={condominiumRankings.mostCompleted}
                     valueKey="completed"
                   />
                   <RankingCard
                     title="Mais acordos cancelados"
-                    description="Top 10 por parcelas com status cancelado."
+                    description="Top 10 por acordos com status cancelado."
                     rows={condominiumRankings.mostCanceled}
                     valueKey="canceled"
                   />
                   <RankingCard
                     title="Maior % de cancelados"
-                    description="Cancelados sobre o total de parcelas/acordos do condomínio."
+                    description="Cancelados sobre o total de acordos do condomínio."
                     rows={condominiumRankings.highestCancelRate}
                     valueKey="cancelRate"
                     valueFormatter={formatPercentage}
@@ -1743,7 +2014,7 @@ function App() {
         </section>
       </div>
 
-      <div className="fixed bottom-4 left-4 z-20 w-[calc(100%-2rem)] max-w-sm">
+      <div className="fixed bottom-3 left-3 right-3 z-20 w-auto max-w-none sm:bottom-4 sm:left-4 sm:right-auto sm:w-[calc(100%-2rem)] sm:max-w-sm">
         {deleteOpen ? (
           <Card className="mb-3 border-white/10 bg-[#0f0f0f] shadow-2xl shadow-black/40">
             <CardHeader className="flex flex-row items-start justify-between gap-3 border-b border-white/10 p-4">

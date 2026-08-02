@@ -20,7 +20,117 @@ const UPLOAD_DIR = process.env.VERCEL ? os.tmpdir() : path.join(__dirname, "uplo
 const DB_FILE = path.join(DATA_DIR, "acordos.json");
 const DB_BLOB_PATH = process.env.DB_BLOB_PATH || "data/acordos.json";
 const IMPORT_BLOB_PATH = process.env.IMPORT_BLOB_PATH || "imports/acordos.csv";
-const G5_USERS = new Set(["jvc", "jvr", "sys"]);
+const USER_COMPANY_TAGS = new Map([
+  ["add", "APSA"],
+  ["adriana diniz", "APSA"],
+  ["agc", "Controlar"],
+  ["agente cobranca", "Controlar"],
+  ["akb", "Controlar"],
+  ["all cobrancas - judicial", "Controlar"],
+  ["all jud", "Controlar"],
+  ["anj", "APSA"],
+  ["anna julia", "APSA"],
+  ["anne karenine santa cruz barbosa", "Controlar"],
+  ["antecipe - rosangela", "Controlar"],
+  ["aph", "APSA"],
+  ["aps", "APSA"],
+  ["apsa", "APSA"],
+  ["apsa bh", "APSA"],
+  ["atp", "Controlar"],
+  ["bbz", "BBZ ADM"],
+  ["bbz adm", "BBZ ADM"],
+  ["bra", "APSA"],
+  ["brt", "APSA"],
+  ["bruna teixeira", "APSA"],
+  ["bruno almeida", "APSA"],
+  ["carlos henrique artur da silva", "Controlar"],
+  ["chr", "APSA"],
+  ["chs", "Controlar"],
+  ["controlar", "Controlar"],
+  ["cristiane rocha", "APSA"],
+  ["ctr", "Controlar"],
+  ["diego tavares da costa", "Controlar"],
+  ["dop", "APSA"],
+  ["douglas pizza", "APSA"],
+  ["dtc", "Controlar"],
+  ["emanuelly martins", "APSA"],
+  ["emm", "APSA"],
+  ["esg", "SEMOG"],
+  ["estagiario gna", "SEMOG"],
+  ["evelyn vitoria paz", "SEMOG"],
+  ["evp", "SEMOG"],
+  ["felipe - semog", "SEMOG"],
+  ["financeiro apsa", "APSA"],
+  ["fna", "APSA"],
+  ["fsa", "SEMOG"],
+  ["g5", "G5"],
+  ["gis", "APSA"],
+  ["giselle sousa", "APSA"],
+  ["hab", "HABITA"],
+  ["habitacional", "HABITA"],
+  ["jackson kawakami", "HABITA"],
+  ["jal", "Controlar"],
+  ["jessica ruana barbosa", "SEMOG"],
+  ["jks", "HABITA"],
+  ["joao victor coimbra", "G5"],
+  ["joao victor rabelo", "G5"],
+  ["jrb", "SEMOG"],
+  ["juridico all", "Controlar"],
+  ["jvc", "G5"],
+  ["jvr", "G5"],
+  ["kainara nascimento", "SEMOG"],
+  ["kan", "SEMOG"],
+  ["lcm", "Controlar"],
+  ["low", "LOWNDES"],
+  ["lowndes", "LOWNDES"],
+  ["luana carla lins mergulhao", "Controlar"],
+  ["luciana reis", "APSA"],
+  ["lur", "APSA"],
+  ["manuela ferreira paiva", "Controlar"],
+  ["marcele da silva goulart", "APSA"],
+  ["marcelo teixeira", "APSA"],
+  ["maria clara gomes", "SEMOG"],
+  ["maria souza", "APSA"],
+  ["mas", "APSA"],
+  ["mat", "APSA"],
+  ["mcg", "SEMOG"],
+  ["mfp", "Controlar"],
+  ["msg", "APSA"],
+  ["nan", "NANTES"],
+  ["nantes sociedade de advogados", "NANTES"],
+  ["per", "APSA"],
+  ["perola esperanca de araujo", "APSA"],
+  ["poliana oliveira da silva", "Controlar"],
+  ["pos", "Controlar"],
+  ["priscilla lopes", "APSA"],
+  ["prl", "APSA"],
+  ["rejane liberal lopes duarte", "Controlar"],
+  ["rld", "Controlar"],
+  ["rms", "HABITA"],
+  ["sea", "APSA"],
+  ["sem", "SEMOG"],
+  ["semog", "SEMOG"],
+  ["sergio augusto", "APSA"],
+  ["sistema", "G5"],
+  ["solange ribeiro", "APSA"],
+  ["sor", "APSA"],
+  ["sys", "G5"],
+  ["tbs", "APSA"],
+  ["teste apsa", "APSA"],
+  ["teste controlar", "Controlar"],
+  ["teste semog", "SEMOG"],
+  ["thayna brum dos santos", "APSA"],
+  ["tlk", "APSA"],
+  ["tlmk apsa", "APSA"],
+  ["tta", "APSA"],
+  ["ttc", "Controlar"],
+  ["tts", "SEMOG"],
+  ["vab", "APSA"],
+  ["valeria manhaes", "APSA"],
+  ["vam", "APSA"],
+  ["vanderceia batista", "APSA"],
+]);
+const COMPANY_TAG_OPTIONS = [...new Set(USER_COMPANY_TAGS.values())].sort((a, b) => a.localeCompare(b, "pt-BR"));
 
 if (!process.env.VERCEL) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -161,8 +271,15 @@ function parseBoolean(value) {
   return ["true", "sim", "1", "yes"].includes(normalizeText(value));
 }
 
-function getAgreementTags(user) {
-  return G5_USERS.has(normalizeText(user)) ? ["G5"] : [];
+function getAgreementTags(user, existingTags = []) {
+  const company = USER_COMPANY_TAGS.get(normalizeText(user));
+  const tags = [...(existingTags || []).filter(Boolean)];
+
+  if (company && !tags.some((tag) => normalizeText(tag) === normalizeText(company))) {
+    tags.push(company);
+  }
+
+  return tags;
 }
 
 function todayIso() {
@@ -185,7 +302,13 @@ function isOverdueAgreement(agreement, referenceDate = todayIso()) {
 
 function withEffectiveStatus(agreement, referenceDate = todayIso()) {
   const effectiveStatus = isOverdueAgreement(agreement, referenceDate) ? "Vencido" : agreement.status;
-  return { ...agreement, originalStatus: agreement.status, effectiveStatus, status: effectiveStatus };
+  return {
+    ...agreement,
+    tags: getAgreementTags(agreement.user, agreement.tags),
+    originalStatus: agreement.status,
+    effectiveStatus,
+    status: effectiveStatus,
+  };
 }
 
 function decodeTextFile(filePath) {
@@ -518,8 +641,8 @@ app.get("/api/agreements", async (req, res) => {
     const statuses = [...new Set(enrichedAgreements.map((item) => item.status).filter(Boolean))].sort((a, b) =>
       a.localeCompare(b, "pt-BR")
     );
-    const teams = [...new Set(enrichedAgreements.flatMap((item) => item.tags || []).filter(Boolean))].sort((a, b) =>
-      a.localeCompare(b, "pt-BR")
+    const teams = [...new Set([...COMPANY_TAG_OPTIONS, ...enrichedAgreements.flatMap((item) => item.tags || [])].filter(Boolean))].sort(
+      (a, b) => a.localeCompare(b, "pt-BR")
     );
 
     res.json({

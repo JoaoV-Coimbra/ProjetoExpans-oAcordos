@@ -2,7 +2,7 @@ import React from "react";
 import { cn } from "@/lib/utils";
 
 const Table = React.forwardRef(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
+  <div className="relative w-full overflow-x-auto">
     <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
   </div>
 ));
@@ -30,14 +30,14 @@ TableRow.displayName = "TableRow";
 const TableHead = React.forwardRef(({ className, ...props }, ref) => (
   <th
     ref={ref}
-    className={cn("h-12 px-4 text-left align-middle text-xs font-semibold uppercase text-muted-foreground", className)}
+    className={cn("h-11 px-3 text-left align-middle text-xs font-semibold uppercase text-muted-foreground sm:h-12 sm:px-4", className)}
     {...props}
   />
 ));
 TableHead.displayName = "TableHead";
 
 const TableCell = React.forwardRef(({ className, ...props }, ref) => (
-  <td ref={ref} className={cn("p-4 align-middle", className)} {...props} />
+  <td ref={ref} className={cn("px-3 py-3 align-middle sm:p-4", className)} {...props} />
 ));
 TableCell.displayName = "TableCell";
 
